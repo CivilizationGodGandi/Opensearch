@@ -135,18 +135,18 @@ def main():
                     assert '방화벽 탐지 횟수: 0건' in html, html
                     assert '웹방화벽 탐지 횟수: 0건' in html, html
                 else:
-                    expected = {'unauthorized': 'ERROR HTTP 401', 'shard_failure': 'ERROR SHARD_FAILURE',
+                    expected = {'unauthorized': 'CURL 22', 'shard_failure': 'ERROR SHARD_FAILURE',
                                 'missing_count': 'ERROR INVALID_COUNT'}[case]
                     assert html.count(expected) == 2, html
                     assert '탐지 횟수: 0건' not in html, html
                 report.append({'case': case, 'status': 'passed', 'requests': len(STATE['requests'])})
                 print('PASSED:', case, flush=True)
-            broken = asp.replace('Set file = fso.OpenTextFile(bodyPath, 1)', 'Set file = fso.OpenTextFile(bodyPath & ".missing", 1)')
+            broken = asp.replace('body = readTextFile(fso, bodyPath)', 'body = readTextFile(fso, bodyPath & ".missing")')
             (ROOT / 'broken.asp').write_bytes(broken.encode('cp949'))
             STATE['case'] = 'normal'
             with urlopen('http://127.0.0.1:18080/broken.asp?ip=203.0.113.9', timeout=70) as response:
                 html = response.read().decode('cp949')
-            assert html.count('본문 파일 열기 / 35') == 2, html
+            assert html.count('조회 실패 [35]') == 2, html
             assert '개체가 필요합니다' not in html and 'Object required' not in html, html
             report.append({'case': 'original_file_error_preserved', 'status': 'passed'})
             print('PASSED: file-open failure reports original stage/code; no Object required masking', flush=True)
