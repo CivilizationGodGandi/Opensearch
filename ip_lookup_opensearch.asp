@@ -2,6 +2,7 @@
 <%
 Response.CharSet = "euc-kr"
 Response.CodePage = 949
+Server.ScriptTimeout = 300
 
 If Left(Request.ServerVariables("REMOTE_ADDR"),11) = "222.233.121" Or Left(Request.ServerVariables("REMOTE_ADDR"),8) = "10.21.22" Or Left(Request.ServerVariables("REMOTE_ADDR"),8) = "10.21.23" Then
 Else
@@ -117,7 +118,7 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         If Err.Number <> 0 Then Exit Do
         command = windowsArg(curlPath) & " --disable --silent --show-error --insecure --ssl-no-revoke"
         command = command & " --tlsv1.2 --tls-max 1.2 --globoff --proxy " & windowsArg("")
-        command = command & " --connect-timeout 5 --max-time 20 --get"
+        command = command & " --connect-timeout 5 --max-time 120 --get"
         command = command & " --header " & windowsArg("Authorization: " & authHeader)
         command = command & " --url " & windowsArg(baseUrl & "/_count")
         command = command & " --data-urlencode " & windowsArg("filter_path=count,_shards.failed,error")

@@ -47,6 +47,8 @@ class Fixture(BaseHTTPRequestHandler):
         assert query in ['data.srcip:"203.0.113.9" AND location:"210.116.108.137"', 'data.srcip:"203.0.113.9" AND location:"210.116.108.249"']
         STATE['requests'].append(query)
         case = STATE['case']
+        if case == 'slow_count' and '210.116.108.137' in query:
+            time.sleep(21)
         if case == 'unauthorized':
             self.reply(401, {'error': 'unauthorized'})
         elif case == 'shard_failure':
@@ -93,6 +95,8 @@ def main():
         for server in (http, https):
             threading.Thread(target=server.serve_forever, daemon=True).start()
         asp = (HERE / 'ip_lookup_opensearch.asp').read_text(encoding='utf-8')
+        assert 'Server.ScriptTimeout = 300' in asp
+        assert '--max-time 120 --get' in asp
         asp = asp.replace('"222.233.121"', '"127.0.0.1"', 1)
         asp = asp.replace('https://api.abuseipdb.com', f'http://127.0.0.1:{http.server_port}')
         (ROOT / 'ip_lookup_opensearch.asp').write_bytes(asp.encode('cp949'))
@@ -106,7 +110,7 @@ def main():
         print('REPRODUCED: file-open error 53 overwritten by Object required 424', flush=True)
         report.append({'case': 'object_required_mask_reproduced', 'status': 'passed'})
         try:
-            for case in ['normal', 'zero', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
+            for case in ['normal', 'slow_count', 'zero', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
                 STATE['case'] = case
                 STATE['requests'] = []
                 url = 'http://127.0.0.1:18080/ip_lookup_opensearch.asp?ip=203.0.113.9'
@@ -124,7 +128,7 @@ def main():
                     assert 'TEST ISP' in html and 'example.test' in html, html
                     assert '75 / 100' in html and '>99<' in html and '>12<' in html, html
                 assert len(STATE['requests']) == 2, html
-                if case in ['normal', 'abuse_unauthorized', 'abuse_empty']:
+                if case in ['normal', 'slow_count', 'abuse_unauthorized', 'abuse_empty']:
                     assert '방화벽 탐지 횟수: 123건' in html, html
                     assert '웹방화벽 탐지 횟수: 456건' in html, html
                 elif case == 'zero':
@@ -150,7 +154,7 @@ def main():
             http.shutdown()
             https.shutdown()
             (HERE / 'tests/test-report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    print('Passed CURL 26 reproduction and 7 real IIS Classic ASP cases; optional client TLS certificates; count-only responses.')
+    print('Passed CURL 26 reproduction and 8 real IIS Classic ASP cases (including a 21-second delayed count); optional client TLS certificates; count-only responses.')
 
 
 if __name__ == '__main__':
