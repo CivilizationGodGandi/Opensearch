@@ -27,34 +27,93 @@ End If
         Set regex = Nothing
     End Function
 
-Function jsonEscape(value)
+Function curlConfigValue(value)
     value = Replace(CStr(value), "\", "\\")
     value = Replace(value, Chr(34), "\" & Chr(34))
     value = Replace(value, vbCr, "\r")
     value = Replace(value, vbLf, "\n")
-    value = Replace(value, vbTab, "\t")
-    jsonEscape = value
+    curlConfigValue = Chr(34) & value & Chr(34)
 End Function
 
-Function encodePowerShell(value)
-    Dim stream, xml, node
-    Set stream = Server.CreateObject("ADODB.Stream")
-    stream.Type = 2
-    stream.Charset = "unicode"
-    stream.Open
-    stream.WriteText value
-    stream.Position = 0
-    stream.Type = 1
-    stream.Position = 2
-    Set xml = Server.CreateObject("MSXML2.DOMDocument.6.0")
-    Set node = xml.createElement("base64")
-    node.dataType = "bin.base64"
-    node.nodeTypedValue = stream.Read
-    encodePowerShell = Replace(Replace(node.text, vbCr, ""), vbLf, "")
-    stream.Close
-    Set node = Nothing
-    Set xml = Nothing
-    Set stream = Nothing
+Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
+    Dim shell, fso, curlPath, process, config, query, url
+    Dim wire, detail, exitCode, marker, status, body, countValue, requestError, checkIP
+
+    Set checkIP = New RegExp
+    checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
+    If Not checkIP.Test(sourceIP) Then
+        getOpenSearchCount = "조회 실패: 올바르지 않은 IP"
+        Exit Function
+    End If
+
+    query = "data.srcip:" & Chr(34) & sourceIP & Chr(34) & " AND " & deviceQuery
+    url = baseUrl & "/_count?filter_path=count,_shards.failed,error&q=" & Server.URLEncode(query)
+    config = "silent" & vbLf & "show-error" & vbLf
+    config = config & "insecure" & vbLf & "ssl-no-revoke" & vbLf
+    config = config & "tlsv1.2" & vbLf & "tls-max = ""1.2""" & vbLf
+    config = config & "globoff" & vbLf & "proxy = """"" & vbLf
+    config = config & "connect-timeout = 5" & vbLf & "max-time = 20" & vbLf
+    config = config & "basic" & vbLf
+    config = config & "user = " & curlConfigValue(userName & ":" & password) & vbLf
+    config = config & "url = " & curlConfigValue(url) & vbLf
+    config = config & "write-out = " & curlConfigValue(vbLf & "%{http_code}") & vbLf
+
+    On Error Resume Next
+    Err.Clear
+    Set shell = Server.CreateObject("WScript.Shell")
+    Set fso = Server.CreateObject("Scripting.FileSystemObject")
+    curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\curl.exe"
+    If Not fso.FileExists(curlPath) Then
+        curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Sysnative\curl.exe"
+    End If
+    Set process = shell.Exec(Chr(34) & curlPath & Chr(34) & " --disable --config -")
+    If Err.Number = 0 Then
+        process.StdIn.Write config
+        process.StdIn.Close
+        wire = process.StdOut.ReadAll
+        detail = process.StdErr.ReadAll
+        exitCode = process.ExitCode
+    End If
+    requestError = Err.Description
+    If Err.Number <> 0 Then
+        Err.Clear
+        On Error GoTo 0
+        Set process = Nothing
+        Set shell = Nothing
+        Set fso = Nothing
+        getOpenSearchCount = "조회 실패: " & requestError
+        Exit Function
+    End If
+    On Error GoTo 0
+    Set process = Nothing
+    Set shell = Nothing
+    Set fso = Nothing
+
+    If exitCode <> 0 Then
+        getOpenSearchCount = "조회 실패 CURL " & exitCode & ": " & Left(Replace(detail, Chr(0), ""), 300)
+        Exit Function
+    End If
+    marker = InStrRev(wire, vbLf)
+    If marker = 0 Then
+        getOpenSearchCount = "조회 실패: HTTP 상태 응답 없음"
+        Exit Function
+    End If
+    status = Trim(Mid(wire, marker + 1))
+    body = Left(wire, marker - 1)
+    If status <> "200" Then
+        getOpenSearchCount = "조회 실패: ERROR HTTP " & status
+        Exit Function
+    End If
+    If extractJsonValue(body, "failed") <> "0" Then
+        getOpenSearchCount = "조회 실패: ERROR SHARD_FAILURE"
+        Exit Function
+    End If
+    countValue = extractJsonValue(body, "count")
+    If countValue = "" Then
+        getOpenSearchCount = "조회 실패: ERROR INVALID_COUNT"
+    Else
+        getOpenSearchCount = countValue
+    End If
 End Function
 
 Dim abuseError, abuseStatus, abuseRequestError
@@ -129,92 +188,14 @@ If ip <> "" Then
         End If
     End If
 	
-    ' ===== OpenSearch 건수 조회: 단일 ASP 내부 처리 =====
+    ' ===== OpenSearch 건수만 조회 =====
     Dim osBaseUrl, osUser, osPassword, fwCount, wafCount
-    Dim osShell, osProcess, osResult, osStderr, osError, osExitCode
-    Dim psExe, psScript, osInput, psEncoded
-
     osBaseUrl = "https://222.233.121.38:9200/wazuh-alerts-*"
     osUser = "admin"
     osPassword = "SecretPassword"
-    fwCount = ""
-    wafCount = ""
 
-    psScript = "$ErrorActionPreference = 'Stop'" & vbLf
-    psScript = psScript & "$cfg = [Console]::In.ReadToEnd() | ConvertFrom-Json" & vbLf
-    psScript = psScript & "Add-Type -TypeDefinition 'using System; using System.Net; public class OsCountClient : WebClient { public static void Configure() { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; ServicePointManager.ServerCertificateValidationCallback = (s,c,ch,e) => true; } protected override WebRequest GetWebRequest(Uri address) { WebRequest r = base.GetWebRequest(address); r.Timeout = 15000; HttpWebRequest h = r as HttpWebRequest; if (h != null) h.ReadWriteTimeout = 15000; return r; } }'" & vbLf
-    psScript = psScript & "[OsCountClient]::Configure()" & vbLf
-    psScript = psScript & "$client = New-Object OsCountClient" & vbLf
-    psScript = psScript & "$client.Proxy = $null" & vbLf
-    psScript = psScript & "$client.Headers['Authorization'] = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cfg.user + ':' + $cfg.password))" & vbLf
-    psScript = psScript & "$parsedIP = $null; if (-not [Net.IPAddress]::TryParse([string]$cfg.ip, [ref]$parsedIP)) { throw 'INVALID_IP' }" & vbLf
-    psScript = psScript & "$cfg.ip = $parsedIP.ToString()" & vbLf
-    psScript = psScript & "$result = @{}" & vbLf
-    psScript = psScript & "foreach ($name in @('fwCount','wafCount')) {" & vbLf
-    psScript = psScript & "    try {" & vbLf
-    psScript = psScript & "        $device = if ($name -eq 'fwCount') { 'data.type:""traffic""' } else { 'decoder.name:""Monitorapp-data""' }" & vbLf
-    psScript = psScript & "        $query = 'data.srcip:""' + $cfg.ip + '"" AND ' + $device" & vbLf
-    psScript = psScript & "        $url = $cfg.baseUrl + '/_count?filter_path=count,_shards.failed,error&q=' + [Uri]::EscapeDataString($query)" & vbLf
-    psScript = psScript & "        $response = $client.DownloadString($url) | ConvertFrom-Json" & vbLf
-    psScript = psScript & "        if ($response._shards.failed -ne 0) {" & vbLf
-    psScript = psScript & "            $result[$name] = 'ERROR SHARD_FAILURE'" & vbLf
-    psScript = psScript & "        } elseif (($null -eq $response.count) -or (($response.count -isnot [int]) -and ($response.count -isnot [long])) -or ($response.count -lt 0)) {" & vbLf
-    psScript = psScript & "            $result[$name] = 'ERROR INVALID_COUNT'" & vbLf
-    psScript = psScript & "        } else {" & vbLf
-    psScript = psScript & "            $result[$name] = [string]$response.count" & vbLf
-    psScript = psScript & "        }" & vbLf
-    psScript = psScript & "    } catch {" & vbLf
-    psScript = psScript & "        $errorObject = $_.Exception" & vbLf
-    psScript = psScript & "        while ($errorObject -and ($errorObject -isnot [Net.WebException])) { $errorObject = $errorObject.InnerException }" & vbLf
-    psScript = psScript & "        if ($errorObject -and $errorObject.Response) {" & vbLf
-    psScript = psScript & "            $result[$name] = 'ERROR HTTP ' + [int]$errorObject.Response.StatusCode" & vbLf
-    psScript = psScript & "        } else {" & vbLf
-    psScript = psScript & "            $detail = [regex]::Replace($_.Exception.Message, '[^A-Za-z0-9 _.:/-]', '?')" & vbLf
-    psScript = psScript & "            $result[$name] = 'ERROR CONNECT ' + $detail.Substring(0, [Math]::Min(180, $detail.Length))" & vbLf
-    psScript = psScript & "        }" & vbLf
-    psScript = psScript & "    }" & vbLf
-    psScript = psScript & "}" & vbLf
-    psScript = psScript & "$client.Dispose()" & vbLf
-    psScript = psScript & "$result | ConvertTo-Json -Compress" & vbLf
-
-    If ipAddress <> "" Then
-        osInput = "{""baseUrl"":""" & jsonEscape(osBaseUrl) & """,""user"":""" & jsonEscape(osUser) & """,""password"":""" & jsonEscape(osPassword) & """,""ip"":""" & jsonEscape(ipAddress) & """}"
-        On Error Resume Next
-        Err.Clear
-        psEncoded = encodePowerShell(psScript)
-        Set osShell = Server.CreateObject("WScript.Shell")
-        psExe = osShell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\WindowsPowerShell\v1.0\powershell.exe"
-        Set osProcess = osShell.Exec(Chr(34) & psExe & Chr(34) & " -NoLogo -NoProfile -NonInteractive -EncodedCommand " & psEncoded)
-
-        If Err.Number = 0 Then
-            osProcess.StdIn.Write osInput
-            osProcess.StdIn.Close
-            osResult = osProcess.StdOut.ReadAll
-            osStderr = osProcess.StdErr.ReadAll
-            osExitCode = osProcess.ExitCode
-        End If
-
-        osError = Err.Description
-        If Err.Number <> 0 Then
-            fwCount = "조회 실패: " & osError
-            wafCount = fwCount
-            Err.Clear
-        ElseIf osExitCode <> 0 Then
-            fwCount = "조회 실패: HTTPS 호출 오류 " & osExitCode & " " & Left(Replace(osStderr, Chr(0), ""), 500)
-            wafCount = fwCount
-        Else
-            fwCount = extractJsonValue(osResult, "fwCount")
-            wafCount = extractJsonValue(osResult, "wafCount")
-            If fwCount = "" Then fwCount = "조회 실패: 건수 응답 없음"
-            If wafCount = "" Then wafCount = "조회 실패: 건수 응답 없음"
-            If Left(fwCount, 5) = "ERROR" Then fwCount = "조회 실패: " & fwCount
-            If Left(wafCount, 5) = "ERROR" Then wafCount = "조회 실패: " & wafCount
-        End If
-
-        Set osProcess = Nothing
-        Set osShell = Nothing
-        On Error GoTo 0
-    End If
+    fwCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "data.type:""traffic""")
+    wafCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "decoder.name:""Monitorapp-data""")
 
     ' ===== AI 호출 =====
     If wafReason <> "" Then
