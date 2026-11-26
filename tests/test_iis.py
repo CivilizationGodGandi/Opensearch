@@ -21,7 +21,7 @@ STATE = {'case': 'normal', 'requests': []}
 
 class Fixture(BaseHTTPRequestHandler):
     def do_GET(self):
-        if '/_count?' in self.path:
+        if '/_search?' in self.path:
             self.count_request()
             return
         if STATE['case'] == 'abuse_unauthorized':
@@ -40,7 +40,13 @@ class Fixture(BaseHTTPRequestHandler):
         self.reply(200, result)
 
     def count_request(self):
-        assert self.path.startswith('/wazuh-archives-*/_count?')
+        assert self.path.startswith('/wazuh-archives-*/_search?')
+        params = parse_qs(urlparse(self.path).query)
+        assert params['size'] == ['0']
+        assert params['track_total_hits'] == ['true']
+        assert params['timeout'] == ['10s']
+        assert params['allow_partial_search_results'] == ['true']
+        assert params['filter_path'] == ['timed_out,hits.total,_shards.failed,error']
         expected = 'Basic ' + base64.b64encode(b'admin:SecretPassword').decode()
         assert self.headers['Authorization'] == expected
         query = parse_qs(urlparse(self.path).query)['q'][0]
@@ -52,12 +58,18 @@ class Fixture(BaseHTTPRequestHandler):
         if case == 'unauthorized':
             self.reply(401, {'error': 'unauthorized'})
         elif case == 'shard_failure':
-            self.reply(200, {'count': 999, '_shards': {'failed': 1}})
+            self.reply(200, {'timed_out': False, 'hits': {'total': {'value': 999, 'relation': 'eq'}}, '_shards': {'failed': 1}})
         elif case == 'missing_count':
-            self.reply(200, {'_shards': {'failed': 0}})
+            self.reply(200, {'timed_out': False, '_shards': {'failed': 0}})
         else:
             count = 0 if case == 'zero' else (123 if '210.116.108.137' in query else 456)
-            self.reply(200, {'count': count, '_shards': {'failed': 0}})
+            timed_out = case == 'partial_zero' or (case == 'partial_count' and '210.116.108.137' in query)
+            if case == 'partial_count' and timed_out:
+                count = 29918
+            elif case == 'partial_zero':
+                count = 0
+            relation = 'gte' if case == 'lower_bound' else 'eq'
+            self.reply(200, {'timed_out': timed_out, 'hits': {'total': {'value': count, 'relation': relation}}, '_shards': {'failed': 0}})
 
     def reply(self, status, data):
         body = json.dumps(data).encode()
@@ -110,7 +122,7 @@ def main():
         print('REPRODUCED: file-open error 53 overwritten by Object required 424', flush=True)
         report.append({'case': 'object_required_mask_reproduced', 'status': 'passed'})
         try:
-            for case in ['normal', 'slow_count', 'zero', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
+            for case in ['normal', 'slow_count', 'zero', 'partial_count', 'partial_zero', 'lower_bound', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
                 STATE['case'] = case
                 STATE['requests'] = []
                 url = 'http://127.0.0.1:18080/ip_lookup_opensearch.asp?ip=203.0.113.9'
@@ -131,6 +143,15 @@ def main():
                 if case in ['normal', 'slow_count', 'abuse_unauthorized', 'abuse_empty']:
                     assert '방화벽 탐지 횟수: 123건' in html, html
                     assert '웹방화벽 탐지 횟수: 456건' in html, html
+                elif case == 'partial_count':
+                    assert '방화벽 탐지 횟수: 29918+건' in html, html
+                    assert '웹방화벽 탐지 횟수: 456건' in html, html
+                elif case == 'partial_zero':
+                    assert '방화벽 탐지 횟수: 0+건' in html, html
+                    assert '웹방화벽 탐지 횟수: 0+건' in html, html
+                elif case == 'lower_bound':
+                    assert '방화벽 탐지 횟수: 123+건' in html, html
+                    assert '웹방화벽 탐지 횟수: 456+건' in html, html
                 elif case == 'zero':
                     assert '방화벽 탐지 횟수: 0건' in html, html
                     assert '웹방화벽 탐지 횟수: 0건' in html, html
@@ -154,7 +175,7 @@ def main():
             http.shutdown()
             https.shutdown()
             (HERE / 'tests/test-report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    print('Passed CURL 26 reproduction and 8 real IIS Classic ASP cases (including a 21-second delayed count); optional client TLS certificates; count-only responses.')
+    print('Passed CURL 26 reproduction and 11 real IIS Classic ASP cases (including partial counts, zero partial counts, lower bounds, and a 21-second delayed response); optional client TLS certificates; count-only responses.')
 
 
 if __name__ == '__main__':

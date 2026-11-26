@@ -53,7 +53,7 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
     End If
 
     query = "data.srcip:" & Chr(34) & sourceIP & Chr(34) & " AND " & deviceQuery
-    url = baseUrl & "/_count?q=" & Server.URLEncode(query) & "&filter_path=count,_shards.failed,error"
+    url = baseUrl & "/_search?size=0&track_total_hits=true&timeout=10s&allow_partial_search_results=true&q=" & Server.URLEncode(query) & "&filter_path=timed_out,hits.total,_shards.failed,error"
 
     On Error Resume Next
     Err.Clear
@@ -100,13 +100,17 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
 
         body = readTextFile(fso, bodyPath)
         If Err.Number <> 0 Then Exit Do
-        countValue = extractJsonValue(body, "count")
-        If extractJsonValue(body, "failed") <> "0" Then
+        countValue = extractJsonValue(body, "value")
+        checkIP.Pattern = """timed_out""\s*:\s*true"
+        If extractJsonValue(body, "failed") <> "0" And Not checkIP.Test(body) Then
             getOpenSearchCount = "조회 실패: ERROR SHARD_FAILURE"
         ElseIf countValue = "" Then
             getOpenSearchCount = "조회 실패: ERROR INVALID_COUNT"
         Else
             getOpenSearchCount = countValue
+            If checkIP.Test(body) Or extractJsonValue(body, "relation") = "gte" Then
+                getOpenSearchCount = countValue & "+"
+            End If
         End If
     Loop While False
 
@@ -284,8 +288,8 @@ End If
 
     <h3 style="margin-top:30px;">내부 보안 장비 탐지 이력</h3>
     <ul>
-        <li>방화벽 탐지 횟수: <%=Server.HTMLEncode(fwCount)%><% If IsNumeric(fwCount) Then Response.Write "건" %></li>
-        <li>웹방화벽 탐지 횟수: <%=Server.HTMLEncode(wafCount)%><% If IsNumeric(wafCount) Then Response.Write "건" %></li>
+        <li>방화벽 탐지 횟수: <%=Server.HTMLEncode(fwCount)%><% If IsNumeric(fwCount) Or Right(fwCount, 1) = "+" Then Response.Write "건" %></li>
+        <li>웹방화벽 탐지 횟수: <%=Server.HTMLEncode(wafCount)%><% If IsNumeric(wafCount) Or Right(wafCount, 1) = "+" Then Response.Write "건" %></li>
         <li>가장 많이 탐지된 룰명: <%'=topKoreanRule%></li>
     </ul>
 
