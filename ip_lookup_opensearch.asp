@@ -40,11 +40,22 @@ Function readTextFile(fso, path)
     file.Close
 End Function
 
-Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
+Function remainingSeconds(startedAt)
+    Dim elapsed
+    elapsed = Timer - startedAt
+    If elapsed < 0 Then elapsed = elapsed + 86400
+    remainingSeconds = 10 - elapsed
+End Function
+
+Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery, startedAt)
     Dim shell, fso, root, workDir, createdDir, bodyPath, errorPath
-    Dim curlPath, command, query, url, code, body, detail, countValue, checkIP, poolName
+    Dim curlPath, command, query, url, code, body, detail, countValue, checkIP, poolName, remaining
     getOpenSearchCount = "조회 실패"
     createdDir = False
+    If remainingSeconds(startedAt) <= 0 Then
+        getOpenSearchCount = "시간 초과"
+        Exit Function
+    End If
     Set checkIP = New RegExp
     checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
     If Not checkIP.Test(sourceIP) Then
@@ -53,7 +64,6 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
     End If
 
     query = "data.srcip:" & Chr(34) & sourceIP & Chr(34) & " AND " & deviceQuery
-    url = baseUrl & "/_search?size=0&track_total_hits=true&timeout=10s&allow_partial_search_results=true&q=" & Server.URLEncode(query) & "&filter_path=timed_out,hits.total,_shards.failed,error"
 
     On Error Resume Next
     Err.Clear
@@ -83,14 +93,24 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         curlPath = root & "\System32\curl.exe"
         If Not fso.FileExists(curlPath) Then curlPath = root & "\Sysnative\curl.exe"
         If Err.Number <> 0 Then Exit Do
+        remaining = remainingSeconds(startedAt)
+        If remaining <= 0 Then
+            getOpenSearchCount = "시간 초과"
+            Exit Do
+        End If
+        url = baseUrl & "/_search?size=0&track_total_hits=true&timeout=" & CLng(remaining * 800) & "ms&allow_partial_search_results=true&q=" & Server.URLEncode(query) & "&filter_path=timed_out,hits.total,_shards.failed,error"
         command = windowsArg(curlPath) & " --disable --silent --show-error --fail --insecure --ssl-no-revoke"
         command = command & " --tlsv1.2 --tls-max 1.2 --globoff --proxy " & windowsArg("")
-        command = command & " --connect-timeout 5 --max-time 120 --get"
+        command = command & " --connect-timeout 5 --max-time " & Replace(CStr(remaining), ",", ".") & " --get"
         command = command & " --user " & windowsArg(userName & ":" & password)
         command = command & " --url " & windowsArg(url)
         command = command & " --output " & windowsArg(bodyPath) & " --stderr " & windowsArg(errorPath)
         code = shell.Run(command, 0, True)
         If Err.Number <> 0 Then Exit Do
+        If code = 28 Then
+            getOpenSearchCount = "시간 초과"
+            Exit Do
+        End If
         If code <> 0 Then
             detail = readTextFile(fso, errorPath)
             If Err.Number <> 0 Then Exit Do
@@ -196,13 +216,14 @@ If ip <> "" Then
     End If
 	
     ' ===== OpenSearch 건수만 조회 =====
-    Dim osBaseUrl, osUser, osPassword, fwCount, wafCount
+    Dim osBaseUrl, osUser, osPassword, fwCount, wafCount, osStartedAt
     osBaseUrl = "https://222.233.121.38:9200/wazuh-archives-*"
     osUser = "admin"
     osPassword = "SecretPassword"
 
-    fwCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "location:""210.116.108.137""")
-    wafCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "location:""210.116.108.249""")
+    osStartedAt = Timer
+    fwCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "location:""210.116.108.137""", osStartedAt)
+    wafCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "location:""210.116.108.249""", osStartedAt)
 
     ' ===== AI 호출 =====
     If wafReason <> "" Then

@@ -44,7 +44,8 @@ class Fixture(BaseHTTPRequestHandler):
         params = parse_qs(urlparse(self.path).query)
         assert params['size'] == ['0']
         assert params['track_total_hits'] == ['true']
-        assert params['timeout'] == ['10s']
+        assert params['timeout'][0].endswith('ms')
+        assert 0 < int(params['timeout'][0][:-2]) <= 8000
         assert params['allow_partial_search_results'] == ['true']
         assert params['filter_path'] == ['timed_out,hits.total,_shards.failed,error']
         expected = 'Basic ' + base64.b64encode(b'admin:SecretPassword').decode()
@@ -55,6 +56,8 @@ class Fixture(BaseHTTPRequestHandler):
         case = STATE['case']
         if case == 'slow_count' and '210.116.108.137' in query:
             time.sleep(21)
+        if case == 'shared_deadline':
+            time.sleep(3 if '210.116.108.137' in query else 21)
         if case == 'unauthorized':
             self.reply(401, {'error': 'unauthorized'})
         elif case == 'shard_failure':
@@ -77,7 +80,10 @@ class Fixture(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, *args):
         pass
@@ -108,7 +114,7 @@ def main():
             threading.Thread(target=server.serve_forever, daemon=True).start()
         asp = (HERE / 'ip_lookup_opensearch.asp').read_text(encoding='utf-8')
         assert 'Server.ScriptTimeout = 300' in asp
-        assert '--max-time 120 --get' in asp
+        assert '--max-time 120' not in asp
         asp = asp.replace('"222.233.121"', '"127.0.0.1"', 1)
         asp = asp.replace('https://api.abuseipdb.com', f'http://127.0.0.1:{http.server_port}')
         (ROOT / 'ip_lookup_opensearch.asp').write_bytes(asp.encode('cp949'))
@@ -122,10 +128,11 @@ def main():
         print('REPRODUCED: file-open error 53 overwritten by Object required 424', flush=True)
         report.append({'case': 'object_required_mask_reproduced', 'status': 'passed'})
         try:
-            for case in ['normal', 'slow_count', 'zero', 'partial_count', 'partial_zero', 'lower_bound', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
+            for case in ['normal', 'slow_count', 'shared_deadline', 'zero', 'partial_count', 'partial_zero', 'lower_bound', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
                 STATE['case'] = case
                 STATE['requests'] = []
                 url = 'http://127.0.0.1:18080/ip_lookup_opensearch.asp?ip=203.0.113.9'
+                started = time.monotonic()
                 try:
                     with urlopen(url, timeout=70) as response:
                         html = response.read().decode('cp949')
@@ -139,8 +146,17 @@ def main():
                 else:
                     assert 'TEST ISP' in html and 'example.test' in html, html
                     assert '75 / 100' in html and '>99<' in html and '>12<' in html, html
-                assert len(STATE['requests']) == 2, html
-                if case in ['normal', 'slow_count', 'abuse_unauthorized', 'abuse_empty']:
+                elapsed = time.monotonic() - started
+                assert len(STATE['requests']) == (1 if case == 'slow_count' else 2), html
+                if case == 'slow_count':
+                    assert html.count('탐지 횟수: 시간 초과') == 2, html
+                    assert '탐지 횟수: 0건' not in html and '탐지 횟수: 0+건' not in html, html
+                    assert 8 <= elapsed < 13, elapsed
+                elif case == 'shared_deadline':
+                    assert '방화벽 탐지 횟수: 123건' in html, html
+                    assert '웹방화벽 탐지 횟수: 시간 초과' in html, html
+                    assert 8 <= elapsed < 13, elapsed
+                elif case in ['normal', 'abuse_unauthorized', 'abuse_empty']:
                     assert '방화벽 탐지 횟수: 123건' in html, html
                     assert '웹방화벽 탐지 횟수: 456건' in html, html
                 elif case == 'partial_count':
@@ -160,7 +176,7 @@ def main():
                                 'missing_count': 'ERROR INVALID_COUNT'}[case]
                     assert html.count(expected) == 2, html
                     assert '탐지 횟수: 0건' not in html, html
-                report.append({'case': case, 'status': 'passed', 'requests': len(STATE['requests'])})
+                report.append({'case': case, 'status': 'passed', 'requests': len(STATE['requests']), 'elapsed_seconds': round(elapsed, 3)})
                 print('PASSED:', case, flush=True)
             broken = asp.replace('body = readTextFile(fso, bodyPath)', 'body = readTextFile(fso, bodyPath & ".missing")')
             (ROOT / 'broken.asp').write_bytes(broken.encode('cp949'))
@@ -175,7 +191,7 @@ def main():
             http.shutdown()
             https.shutdown()
             (HERE / 'tests/test-report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    print('Passed CURL 26 reproduction and 11 real IIS Classic ASP cases (including partial counts, zero partial counts, lower bounds, and a 21-second delayed response); optional client TLS certificates; count-only responses.')
+    print('Passed CURL 26 reproduction and 12 real IIS Classic ASP cases (including partial counts and a shared 10-second transport deadline); optional client TLS certificates; count-only responses.')
 
 
 if __name__ == '__main__':
