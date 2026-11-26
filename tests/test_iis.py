@@ -73,7 +73,12 @@ def main():
     ROOT.mkdir(parents=True, exist_ok=True)
     report = []
     with tempfile.TemporaryDirectory() as folder:
-        cert, key = Path(folder) / 'cert.pem', Path(folder) / 'key.pem'
+        curl = Path(os.environ['SystemRoot']) / 'System32/curl.exe'
+        failure = subprocess.run([str(curl), '--disable', '--config', str(Path(folder) / 'missing-config.txt')], capture_output=True)
+        assert failure.returncode == 26, (failure.returncode, failure.stderr)
+        print('REPRODUCED: unreadable local curl config returns CURL 26', flush=True)
+        report.append({'case': 'curl_26_reproduced', 'status': 'passed'})
+        cert, key = Path(folder) / 'cert.pem', Path(folder) / 'key.pem' 
         openssl = shutil.which('openssl') or r'C:\Program Files\Git\usr\bin\openssl.exe'
         subprocess.run([openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
                         '-keyout', str(key), '-out', str(cert), '-days', '1',
@@ -129,7 +134,7 @@ def main():
             http.shutdown()
             https.shutdown()
             (HERE / 'tests/test-report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    print('Passed 7 real IIS Classic ASP cases; optional client TLS certificates; count-only responses.')
+    print('Passed CURL 26 reproduction and 7 real IIS Classic ASP cases; optional client TLS certificates; count-only responses.')
 
 
 if __name__ == '__main__':

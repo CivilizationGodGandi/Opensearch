@@ -48,18 +48,15 @@ Function basicAuth(value)
     Set stream = Nothing
 End Function
 
-Function curlConfigValue(value)
-    value = Replace(CStr(value), "\", "\\")
-    value = Replace(value, Chr(34), "\" & Chr(34))
-    value = Replace(value, vbCr, "\r")
-    value = Replace(value, vbLf, "\n")
-    curlConfigValue = Chr(34) & value & Chr(34)
+Function windowsArg(value)
+    windowsArg = Chr(34) & Replace(CStr(value), Chr(34), "\" & Chr(34)) & Chr(34)
 End Function
 
 Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
-    Dim shell, fso, curlPath, configPath, bodyPath, headerPath, folder, file
-    Dim config, query, url, exitCode, status, body, headers, countValue, requestError
-    Dim checkIP, matches
+    Dim shell, fso, curlPath, bodyPath, headerPath, errorPath, folder, file
+    Dim command, query, exitCode, status, body, headers, detail, countValue
+    Dim checkIP, matches, requestError
+
     Set checkIP = New RegExp
     checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
     If Not checkIP.Test(sourceIP) Then
@@ -67,31 +64,30 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         Exit Function
     End If
     query = "data.srcip:" & Chr(34) & sourceIP & Chr(34) & " AND " & deviceQuery
-    url = baseUrl & "/_count?filter_path=count,_shards.failed,error&q=" & Server.URLEncode(query)
 
     On Error Resume Next
     Err.Clear
     Set shell = Server.CreateObject("WScript.Shell")
     Set fso = Server.CreateObject("Scripting.FileSystemObject")
-    folder = fso.GetSpecialFolder(2)
-    configPath = fso.BuildPath(folder, fso.GetTempName)
+    folder = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Temp"
     bodyPath = fso.BuildPath(folder, fso.GetTempName)
     headerPath = fso.BuildPath(folder, fso.GetTempName)
+    errorPath = fso.BuildPath(folder, fso.GetTempName)
     curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\curl.exe"
     If Not fso.FileExists(curlPath) Then curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Sysnative\curl.exe"
 
-    config = "silent" & vbLf & "insecure" & vbLf & "ssl-no-revoke" & vbLf
-    config = config & "tlsv1.2" & vbLf & "tls-max = ""1.2""" & vbLf
-    config = config & "globoff" & vbLf & "proxy = """"" & vbLf
-    config = config & "connect-timeout = 5" & vbLf & "max-time = 20" & vbLf
-    config = config & "header = " & curlConfigValue("Authorization: " & basicAuth(userName & ":" & password)) & vbLf
-    config = config & "url = " & curlConfigValue(url) & vbLf
-    config = config & "output = " & curlConfigValue(bodyPath) & vbLf
-    config = config & "dump-header = " & curlConfigValue(headerPath) & vbLf
-    Set file = fso.CreateTextFile(configPath, False)
-    file.Write config
-    file.Close
-    If Err.Number = 0 Then exitCode = shell.Run(Chr(34) & curlPath & Chr(34) & " --disable --config " & Chr(34) & configPath & Chr(34), 0, True)
+    command = windowsArg(curlPath) & " --disable --silent --show-error --insecure --ssl-no-revoke"
+    command = command & " --tlsv1.2 --tls-max 1.2 --globoff --proxy " & windowsArg("")
+    command = command & " --connect-timeout 5 --max-time 20 --get"
+    command = command & " --header " & windowsArg("Authorization: " & basicAuth(userName & ":" & password))
+    command = command & " --url " & windowsArg(baseUrl & "/_count")
+    command = command & " --data-urlencode " & windowsArg("filter_path=count,_shards.failed,error")
+    command = command & " --data-urlencode " & windowsArg("q=" & query)
+    command = command & " --output " & windowsArg(bodyPath)
+    command = command & " --dump-header " & windowsArg(headerPath)
+    command = command & " --stderr " & windowsArg(errorPath)
+
+    If Err.Number = 0 Then exitCode = shell.Run(command, 0, True)
     If Err.Number = 0 And exitCode = 0 Then
         Set file = fso.OpenTextFile(bodyPath, 1)
         body = file.ReadAll
@@ -104,7 +100,13 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
     If Err.Number <> 0 Then
         getOpenSearchCount = "조회 실패: " & requestError
     ElseIf exitCode <> 0 Then
-        getOpenSearchCount = "조회 실패 CURL " & exitCode
+        detail = ""
+        If fso.FileExists(errorPath) Then
+            Set file = fso.OpenTextFile(errorPath, 1)
+            detail = file.ReadAll
+            file.Close
+        End If
+        getOpenSearchCount = "조회 실패 CURL " & exitCode & ": " & Left(Trim(detail), 500)
     Else
         checkIP.Pattern = "HTTP/[0-9.]+\s+([0-9]{3})"
         checkIP.Global = True
@@ -124,10 +126,11 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
             End If
         End If
     End If
+
     Err.Clear
-    If fso.FileExists(configPath) Then fso.DeleteFile configPath, True
     If fso.FileExists(bodyPath) Then fso.DeleteFile bodyPath, True
     If fso.FileExists(headerPath) Then fso.DeleteFile headerPath, True
+    If fso.FileExists(errorPath) Then fso.DeleteFile errorPath, True
     Set file = Nothing
     Set fso = Nothing
     Set shell = Nothing
