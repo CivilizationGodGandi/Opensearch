@@ -27,88 +27,74 @@ End If
         Set regex = Nothing
     End Function
 
-Function curlConfigValue(value)
-    value = Replace(CStr(value), "\", "\\")
-    value = Replace(value, Chr(34), "\" & Chr(34))
-    value = Replace(value, vbCr, "\r")
-    value = Replace(value, vbLf, "\n")
-    curlConfigValue = Chr(34) & value & Chr(34)
+Function basicAuth(value)
+    Dim stream, xml, node
+    Set stream = Server.CreateObject("ADODB.Stream")
+    stream.Type = 2
+    stream.Charset = "utf-8"
+    stream.Open
+    stream.WriteText value
+    stream.Position = 0
+    stream.Type = 1
+    stream.Position = 3
+    Set xml = Server.CreateObject("MSXML2.DOMDocument.6.0")
+    Set node = xml.createElement("base64")
+    node.dataType = "bin.base64"
+    node.nodeTypedValue = stream.Read
+    basicAuth = "Basic " & Replace(Replace(node.text, vbCr, ""), vbLf, "")
+    stream.Close
+    Set node = Nothing
+    Set xml = Nothing
+    Set stream = Nothing
 End Function
 
 Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
-    Dim shell, fso, curlPath, process, config, query, url
-    Dim wire, detail, exitCode, marker, status, body, countValue, requestError, checkIP
-
+    Dim http, query, url, result, status, requestError, countValue, checkIP
     Set checkIP = New RegExp
     checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
     If Not checkIP.Test(sourceIP) Then
         getOpenSearchCount = "조회 실패: 올바르지 않은 IP"
         Exit Function
     End If
-
     query = "data.srcip:" & Chr(34) & sourceIP & Chr(34) & " AND " & deviceQuery
     url = baseUrl & "/_count?filter_path=count,_shards.failed,error&q=" & Server.URLEncode(query)
-    config = "silent" & vbLf & "show-error" & vbLf
-    config = config & "insecure" & vbLf & "ssl-no-revoke" & vbLf
-    config = config & "tlsv1.2" & vbLf & "tls-max = ""1.2""" & vbLf
-    config = config & "globoff" & vbLf & "proxy = """"" & vbLf
-    config = config & "connect-timeout = 5" & vbLf & "max-time = 20" & vbLf
-    config = config & "basic" & vbLf
-    config = config & "user = " & curlConfigValue(userName & ":" & password) & vbLf
-    config = config & "url = " & curlConfigValue(url) & vbLf
-    config = config & "write-out = " & curlConfigValue(vbLf & "%{http_code}") & vbLf
 
     On Error Resume Next
     Err.Clear
-    Set shell = Server.CreateObject("WScript.Shell")
-    Set fso = Server.CreateObject("Scripting.FileSystemObject")
-    curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\curl.exe"
-    If Not fso.FileExists(curlPath) Then
-        curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Sysnative\curl.exe"
-    End If
-    Set process = shell.Exec(Chr(34) & curlPath & Chr(34) & " --disable --config -")
+    Set http = Server.CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 5000, 5000, 10000, 20000
+    http.SetProxy 1
+    http.Open "GET", url, False
+    http.Option(4) = 13056
+    http.Option(9) = 2048
+    http.Option(11) = True
+    http.SetRequestHeader "Authorization", basicAuth(userName & ":" & password)
+    http.SetRequestHeader "Accept", "application/json"
+    http.Send
     If Err.Number = 0 Then
-        process.StdIn.Write config
-        process.StdIn.Close
-        wire = process.StdOut.ReadAll
-        detail = process.StdErr.ReadAll
-        exitCode = process.ExitCode
+        status = http.Status
+        result = http.ResponseText
     End If
     requestError = Err.Description
     If Err.Number <> 0 Then
         Err.Clear
         On Error GoTo 0
-        Set process = Nothing
-        Set shell = Nothing
-        Set fso = Nothing
+        Set http = Nothing
         getOpenSearchCount = "조회 실패: " & requestError
         Exit Function
     End If
     On Error GoTo 0
-    Set process = Nothing
-    Set shell = Nothing
-    Set fso = Nothing
+    Set http = Nothing
 
-    If exitCode <> 0 Then
-        getOpenSearchCount = "조회 실패 CURL " & exitCode & ": " & Left(Replace(detail, Chr(0), ""), 300)
-        Exit Function
-    End If
-    marker = InStrRev(wire, vbLf)
-    If marker = 0 Then
-        getOpenSearchCount = "조회 실패: HTTP 상태 응답 없음"
-        Exit Function
-    End If
-    status = Trim(Mid(wire, marker + 1))
-    body = Left(wire, marker - 1)
-    If status <> "200" Then
+    If status <> 200 Then
         getOpenSearchCount = "조회 실패: ERROR HTTP " & status
         Exit Function
     End If
-    If extractJsonValue(body, "failed") <> "0" Then
+    If extractJsonValue(result, "failed") <> "0" Then
         getOpenSearchCount = "조회 실패: ERROR SHARD_FAILURE"
         Exit Function
     End If
-    countValue = extractJsonValue(body, "count")
+    countValue = extractJsonValue(result, "count")
     If countValue = "" Then
         getOpenSearchCount = "조회 실패: ERROR INVALID_COUNT"
     Else
