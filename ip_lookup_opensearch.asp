@@ -55,7 +55,7 @@ End Function
 Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
     Dim shell, fso, curlPath, bodyPath, headerPath, errorPath, workDir, file, process
     Dim command, query, exitCode, status, body, headers, detail, countValue
-    Dim checkIP, matches, stage, identityText, callerSid, poolName, authHeader, aclCommand, createdDir
+    Dim checkIP, matches, stage, poolName, authHeader, aclCommand, createdDir, waitStarted, tempPath
     workDir = ""
     createdDir = False
     getOpenSearchCount = "조회 실패: 응답 없음"
@@ -83,19 +83,7 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         If Err.Number <> 0 Then Exit Do
         createdDir = True
 
-        stage = "실행 계정 확인"
-        Set process = shell.Exec(windowsArg(shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\whoami.exe") & " /user /fo csv /nh")
-        If Err.Number <> 0 Then Exit Do
-        identityText = process.StdOut.ReadAll
-        If Err.Number <> 0 Then Exit Do
-        checkIP.Pattern = "S-[0-9]+(-[0-9]+)+"
-        Set matches = checkIP.Execute(identityText)
-        If Err.Number <> 0 Then Exit Do
-        If process.ExitCode <> 0 Or matches.Count = 0 Then
-            getOpenSearchCount = "조회 실패 [실행 계정 확인]"
-            Exit Do
-        End If
-        callerSid = matches(0).Value
+        stage = "앱 풀 이름 확인"
         poolName = Request.ServerVariables("APP_POOL_ID")
         If poolName = "" Then
             getOpenSearchCount = "조회 실패 [앱 풀 이름 확인]"
@@ -104,15 +92,22 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
 
         stage = "요청 폴더 접근 설정"
         aclCommand = windowsArg(shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\icacls.exe")
-        aclCommand = aclCommand & " " & windowsArg(workDir) & " /inheritance:r /grant:r"
-        aclCommand = aclCommand & " " & windowsArg("*" & callerSid & ":(OI)(CI)F")
-        aclCommand = aclCommand & " " & windowsArg("IIS AppPool\" & poolName & ":(OI)(CI)M")
-        aclCommand = aclCommand & " " & windowsArg("*S-1-5-18:(OI)(CI)F")
-        aclCommand = aclCommand & " " & windowsArg("*S-1-5-32-544:(OI)(CI)F")
+        aclCommand = aclCommand & " " & windowsArg(workDir) & " /grant "
+        aclCommand = aclCommand & windowsArg("IIS AppPool\" & poolName & ":(OI)(CI)M")
         Set process = shell.Exec(aclCommand)
         If Err.Number <> 0 Then Exit Do
         detail = process.StdOut.ReadAll
         If Err.Number <> 0 Then Exit Do
+        detail = detail & process.StdErr.ReadAll
+        If Err.Number <> 0 Then Exit Do
+        waitStarted = Timer
+        Do While process.Status = 0
+            If Timer < waitStarted Or Timer - waitStarted > 2 Then Exit Do
+        Loop
+        If process.Status = 0 Then
+            getOpenSearchCount = "조회 실패 [요청 폴더 접근 설정]: 실행 대기 초과"
+            Exit Do
+        End If
         If process.ExitCode <> 0 Then
             getOpenSearchCount = "조회 실패 [요청 폴더 접근 설정]: " & Left(detail, 300)
             Exit Do
@@ -121,6 +116,15 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         bodyPath = fso.BuildPath(workDir, "body.tmp")
         headerPath = fso.BuildPath(workDir, "header.tmp")
         errorPath = fso.BuildPath(workDir, "error.tmp")
+        stage = "결과 파일 생성"
+        For Each tempPath In Array(bodyPath, headerPath, errorPath)
+            Set file = fso.CreateTextFile(tempPath, False)
+            If Err.Number <> 0 Then Exit For
+            file.Close
+            If Err.Number <> 0 Then Exit For
+        Next
+        If Err.Number <> 0 Then Exit Do
+
         curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\curl.exe"
         If Not fso.FileExists(curlPath) Then curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Sysnative\curl.exe"
         If Not fso.FileExists(curlPath) Then
