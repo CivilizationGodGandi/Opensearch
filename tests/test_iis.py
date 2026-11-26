@@ -21,6 +21,9 @@ STATE = {'case': 'normal', 'requests': []}
 
 class Fixture(BaseHTTPRequestHandler):
     def do_GET(self):
+        if '/_count?' in self.path:
+            self.count_request()
+            return
         ip = parse_qs(urlparse(self.path).query)['ipAddress'][0]
         result = {'data': {
             'ipAddress': ip, 'abuseConfidenceScore': 75, 'countryCode': 'KR',
@@ -30,15 +33,13 @@ class Fixture(BaseHTTPRequestHandler):
         }}
         self.reply(200, result)
 
-    def do_POST(self):
+    def count_request(self):
         assert self.path.startswith('/wazuh-alerts-*/_count?')
         expected = 'Basic ' + base64.b64encode(b'admin:SecretPassword').decode()
         assert self.headers['Authorization'] == expected
-        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        filters = body['query']['bool']['filter']
-        assert filters[0] == {'term': {'data.srcip': '203.0.113.9'}}
-        assert 'size' not in body and 'aggs' not in body
-        STATE['requests'].append(body)
+        query = parse_qs(urlparse(self.path).query)['q'][0]
+        assert query in ['data.srcip:"203.0.113.9" AND data.type:"traffic"', 'data.srcip:"203.0.113.9" AND decoder.name:"Monitorapp-data"']
+        STATE['requests'].append(query)
         case = STATE['case']
         if case == 'unauthorized':
             self.reply(401, {'error': 'unauthorized'})
@@ -47,7 +48,7 @@ class Fixture(BaseHTTPRequestHandler):
         elif case == 'missing_count':
             self.reply(200, {'_shards': {'failed': 0}})
         else:
-            count = 0 if case == 'zero' else (123 if 'data.type' in filters[1]['term'] else 456)
+            count = 0 if case == 'zero' else (123 if 'data.type:' in query else 456)
             self.reply(200, {'count': count, '_shards': {'failed': 0}})
 
     def reply(self, status, data):
@@ -83,11 +84,9 @@ def main():
         asp = (HERE / 'ip_lookup_opensearch.asp').read_text(encoding='utf-8')
         asp = asp.replace('"222.233.121"', '"127.0.0.1"', 1)
         asp = asp.replace('https://api.abuseipdb.com', f'http://127.0.0.1:{http.server_port}')
-        asp = asp.replace('pythonExe = "python.exe"', f'pythonExe = "{sys.executable}"')
         (ROOT / 'ip_lookup_opensearch.asp').write_bytes(asp.encode('cp949'))
-        helper = (HERE / 'opensearch_count.py').read_text(encoding='utf-8')
-        helper = helper.replace('https://222.233.121.38:9200', f'https://127.0.0.1:{https.server_port}')
-        (ROOT / 'opensearch_count.py').write_text(helper, encoding='utf-8')
+        asp = asp.replace('https://222.233.121.38:9200', f'https://127.0.0.1:{https.server_port}')
+        (ROOT / 'ip_lookup_opensearch.asp').write_bytes(asp.encode('cp949'))
         try:
             for case in ['normal', 'zero', 'unauthorized', 'shard_failure', 'missing_count']:
                 STATE['case'] = case

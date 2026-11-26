@@ -27,6 +27,36 @@ End If
         Set regex = Nothing
     End Function
 
+Function jsonEscape(value)
+    value = Replace(CStr(value), "\", "\\")
+    value = Replace(value, Chr(34), "\" & Chr(34))
+    value = Replace(value, vbCr, "\r")
+    value = Replace(value, vbLf, "\n")
+    value = Replace(value, vbTab, "\t")
+    jsonEscape = value
+End Function
+
+Function encodePowerShell(value)
+    Dim stream, xml, node
+    Set stream = Server.CreateObject("ADODB.Stream")
+    stream.Type = 2
+    stream.Charset = "unicode"
+    stream.Open
+    stream.WriteText value
+    stream.Position = 0
+    stream.Type = 1
+    stream.Position = 2
+    Set xml = Server.CreateObject("MSXML2.DOMDocument.6.0")
+    Set node = xml.createElement("base64")
+    node.dataType = "bin.base64"
+    node.nodeTypedValue = stream.Read
+    encodePowerShell = Replace(Replace(node.text, vbCr, ""), vbLf, "")
+    stream.Close
+    Set node = Nothing
+    Set xml = Nothing
+    Set stream = Nothing
+End Function
+
 Dim ip, ipAddress, abuseScore, countryCode, usageType, isp, domain, totalReports, distinctUsers, lastReportedAt, isTor, fullLog, wafReason, wafAction, aiResponse, topKoreanRule
 ip = Request.QueryString("ip")
 
@@ -74,24 +104,63 @@ If ip <> "" Then
         End If
     End If
 	
-    ' ===== OpenSearch 건수 조회: Python 호출 =====
-    Dim pythonExe, pythonScript, osShell, osProcess, osResult, osStderr
-    Dim osError, osExitCode, fwCount, wafCount
+    ' ===== OpenSearch 건수 조회: 단일 ASP 내부 처리 =====
+    Dim osBaseUrl, osUser, osPassword, fwCount, wafCount
+    Dim osShell, osProcess, osResult, osStderr, osError, osExitCode
+    Dim psExe, psScript, osInput, psEncoded
 
-    pythonExe = "python.exe"
-    pythonScript = Server.MapPath("opensearch_count.py")
+    osBaseUrl = "https://222.233.121.38:9200/wazuh-alerts-*"
+    osUser = "admin"
+    osPassword = "SecretPassword"
     fwCount = ""
     wafCount = ""
 
+    psScript = "$ErrorActionPreference = 'Stop'" & vbLf
+    psScript = psScript & "$cfg = [Console]::In.ReadToEnd() | ConvertFrom-Json" & vbLf
+    psScript = psScript & "Add-Type -TypeDefinition 'using System; using System.Net; public class OsCountClient : WebClient { public static void Configure() { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; ServicePointManager.ServerCertificateValidationCallback = (s,c,ch,e) => true; } protected override WebRequest GetWebRequest(Uri address) { WebRequest r = base.GetWebRequest(address); r.Timeout = 15000; HttpWebRequest h = r as HttpWebRequest; if (h != null) h.ReadWriteTimeout = 15000; return r; } }'" & vbLf
+    psScript = psScript & "[OsCountClient]::Configure()" & vbLf
+    psScript = psScript & "$client = New-Object OsCountClient" & vbLf
+    psScript = psScript & "$client.Proxy = $null" & vbLf
+    psScript = psScript & "$client.Headers['Authorization'] = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cfg.user + ':' + $cfg.password))" & vbLf
+    psScript = psScript & "$result = @{}" & vbLf
+    psScript = psScript & "foreach ($name in @('fwCount','wafCount')) {" & vbLf
+    psScript = psScript & "    try {" & vbLf
+    psScript = psScript & "        $device = if ($name -eq 'fwCount') { 'data.type:""traffic""' } else { 'decoder.name:""Monitorapp-data""' }" & vbLf
+    psScript = psScript & "        $query = 'data.srcip:""' + $cfg.ip + '"" AND ' + $device" & vbLf
+    psScript = psScript & "        $url = $cfg.baseUrl + '/_count?filter_path=count,_shards.failed,error&q=' + [Uri]::EscapeDataString($query)" & vbLf
+    psScript = psScript & "        $response = $client.DownloadString($url) | ConvertFrom-Json" & vbLf
+    psScript = psScript & "        if ($response._shards.failed -ne 0) {" & vbLf
+    psScript = psScript & "            $result[$name] = 'ERROR SHARD_FAILURE'" & vbLf
+    psScript = psScript & "        } elseif (($null -eq $response.count) -or (($response.count -isnot [int]) -and ($response.count -isnot [long])) -or ($response.count -lt 0)) {" & vbLf
+    psScript = psScript & "            $result[$name] = 'ERROR INVALID_COUNT'" & vbLf
+    psScript = psScript & "        } else {" & vbLf
+    psScript = psScript & "            $result[$name] = [string]$response.count" & vbLf
+    psScript = psScript & "        }" & vbLf
+    psScript = psScript & "    } catch {" & vbLf
+    psScript = psScript & "        $errorObject = $_.Exception" & vbLf
+    psScript = psScript & "        while ($errorObject -and ($errorObject -isnot [Net.WebException])) { $errorObject = $errorObject.InnerException }" & vbLf
+    psScript = psScript & "        if ($errorObject -and $errorObject.Response) {" & vbLf
+    psScript = psScript & "            $result[$name] = 'ERROR HTTP ' + [int]$errorObject.Response.StatusCode" & vbLf
+    psScript = psScript & "        } else {" & vbLf
+    psScript = psScript & "            $detail = [regex]::Replace($_.Exception.Message, '[^A-Za-z0-9 _.:/-]', '?')" & vbLf
+    psScript = psScript & "            $result[$name] = 'ERROR CONNECT ' + $detail.Substring(0, [Math]::Min(180, $detail.Length))" & vbLf
+    psScript = psScript & "        }" & vbLf
+    psScript = psScript & "    }" & vbLf
+    psScript = psScript & "}" & vbLf
+    psScript = psScript & "$client.Dispose()" & vbLf
+    psScript = psScript & "$result | ConvertTo-Json -Compress" & vbLf
+
     If ipAddress <> "" Then
+        osInput = "{""baseUrl"":""" & jsonEscape(osBaseUrl) & """,""user"":""" & jsonEscape(osUser) & """,""password"":""" & jsonEscape(osPassword) & """,""ip"":""" & jsonEscape(ipAddress) & """}"
         On Error Resume Next
         Err.Clear
-
+        psEncoded = encodePowerShell(psScript)
         Set osShell = Server.CreateObject("WScript.Shell")
-        Set osProcess = osShell.Exec(Chr(34) & pythonExe & Chr(34) & " " & Chr(34) & pythonScript & Chr(34))
+        psExe = osShell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\WindowsPowerShell\v1.0\powershell.exe"
+        Set osProcess = osShell.Exec(Chr(34) & psExe & Chr(34) & " -NoLogo -NoProfile -NonInteractive -EncodedCommand " & psEncoded)
 
         If Err.Number = 0 Then
-            osProcess.StdIn.WriteLine ipAddress
+            osProcess.StdIn.Write osInput
             osProcess.StdIn.Close
             osResult = osProcess.StdOut.ReadAll
             osStderr = osProcess.StdErr.ReadAll
@@ -104,14 +173,13 @@ If ip <> "" Then
             wafCount = fwCount
             Err.Clear
         ElseIf osExitCode <> 0 Then
-            fwCount = "조회 실패: Python 실행 오류 " & osExitCode & " " & Left(osStderr, 200)
+            fwCount = "조회 실패: HTTPS 호출 오류 " & osExitCode & " " & Left(osStderr, 200)
             wafCount = fwCount
         Else
             fwCount = extractJsonValue(osResult, "fwCount")
             wafCount = extractJsonValue(osResult, "wafCount")
-
-            If fwCount = "" Then fwCount = "조회 실패: Python 응답 없음"
-            If wafCount = "" Then wafCount = "조회 실패: Python 응답 없음"
+            If fwCount = "" Then fwCount = "조회 실패: 건수 응답 없음"
+            If wafCount = "" Then wafCount = "조회 실패: 건수 응답 없음"
             If Left(fwCount, 5) = "ERROR" Then fwCount = "조회 실패: " & fwCount
             If Left(wafCount, 5) = "ERROR" Then wafCount = "조회 실패: " & wafCount
         End If
