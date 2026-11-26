@@ -48,8 +48,18 @@ Function basicAuth(value)
     Set stream = Nothing
 End Function
 
+Function curlConfigValue(value)
+    value = Replace(CStr(value), "\", "\\")
+    value = Replace(value, Chr(34), "\" & Chr(34))
+    value = Replace(value, vbCr, "\r")
+    value = Replace(value, vbLf, "\n")
+    curlConfigValue = Chr(34) & value & Chr(34)
+End Function
+
 Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
-    Dim http, query, url, result, status, requestError, countValue, checkIP
+    Dim shell, fso, curlPath, configPath, bodyPath, headerPath, folder, file
+    Dim config, query, url, exitCode, status, body, headers, countValue, requestError
+    Dim checkIP, matches
     Set checkIP = New RegExp
     checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
     If Not checkIP.Test(sourceIP) Then
@@ -61,45 +71,67 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
 
     On Error Resume Next
     Err.Clear
-    Set http = Server.CreateObject("WinHttp.WinHttpRequest.5.1")
-    http.SetTimeouts 5000, 5000, 10000, 20000
-    http.SetProxy 1
-    http.Open "GET", url, False
-    http.Option(4) = 13056
-    http.Option(9) = 2048
-    http.Option(11) = True
-    http.SetRequestHeader "Authorization", basicAuth(userName & ":" & password)
-    http.SetRequestHeader "Accept", "application/json"
-    http.Send
-    If Err.Number = 0 Then
-        status = http.Status
-        result = http.ResponseText
+    Set shell = Server.CreateObject("WScript.Shell")
+    Set fso = Server.CreateObject("Scripting.FileSystemObject")
+    folder = fso.GetSpecialFolder(2)
+    configPath = fso.BuildPath(folder, fso.GetTempName)
+    bodyPath = fso.BuildPath(folder, fso.GetTempName)
+    headerPath = fso.BuildPath(folder, fso.GetTempName)
+    curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\curl.exe"
+    If Not fso.FileExists(curlPath) Then curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Sysnative\curl.exe"
+
+    config = "silent" & vbLf & "insecure" & vbLf & "ssl-no-revoke" & vbLf
+    config = config & "tlsv1.2" & vbLf & "tls-max = ""1.2""" & vbLf
+    config = config & "globoff" & vbLf & "proxy = """"" & vbLf
+    config = config & "connect-timeout = 5" & vbLf & "max-time = 20" & vbLf
+    config = config & "header = " & curlConfigValue("Authorization: " & basicAuth(userName & ":" & password)) & vbLf
+    config = config & "url = " & curlConfigValue(url) & vbLf
+    config = config & "output = " & curlConfigValue(bodyPath) & vbLf
+    config = config & "dump-header = " & curlConfigValue(headerPath) & vbLf
+    Set file = fso.CreateTextFile(configPath, False)
+    file.Write config
+    file.Close
+    If Err.Number = 0 Then exitCode = shell.Run(Chr(34) & curlPath & Chr(34) & " --disable --config " & Chr(34) & configPath & Chr(34), 0, True)
+    If Err.Number = 0 And exitCode = 0 Then
+        Set file = fso.OpenTextFile(bodyPath, 1)
+        body = file.ReadAll
+        file.Close
+        Set file = fso.OpenTextFile(headerPath, 1)
+        headers = file.ReadAll
+        file.Close
     End If
     requestError = Err.Description
     If Err.Number <> 0 Then
-        Err.Clear
-        On Error GoTo 0
-        Set http = Nothing
         getOpenSearchCount = "조회 실패: " & requestError
-        Exit Function
-    End If
-    On Error GoTo 0
-    Set http = Nothing
-
-    If status <> 200 Then
-        getOpenSearchCount = "조회 실패: ERROR HTTP " & status
-        Exit Function
-    End If
-    If extractJsonValue(result, "failed") <> "0" Then
-        getOpenSearchCount = "조회 실패: ERROR SHARD_FAILURE"
-        Exit Function
-    End If
-    countValue = extractJsonValue(result, "count")
-    If countValue = "" Then
-        getOpenSearchCount = "조회 실패: ERROR INVALID_COUNT"
+    ElseIf exitCode <> 0 Then
+        getOpenSearchCount = "조회 실패 CURL " & exitCode
     Else
-        getOpenSearchCount = countValue
+        checkIP.Pattern = "HTTP/[0-9.]+\s+([0-9]{3})"
+        checkIP.Global = True
+        Set matches = checkIP.Execute(headers)
+        status = ""
+        If matches.Count > 0 Then status = matches(matches.Count - 1).SubMatches(0)
+        If status <> "200" Then
+            getOpenSearchCount = "조회 실패: ERROR HTTP " & status
+        ElseIf extractJsonValue(body, "failed") <> "0" Then
+            getOpenSearchCount = "조회 실패: ERROR SHARD_FAILURE"
+        Else
+            countValue = extractJsonValue(body, "count")
+            If countValue = "" Then
+                getOpenSearchCount = "조회 실패: ERROR INVALID_COUNT"
+            Else
+                getOpenSearchCount = countValue
+            End If
+        End If
     End If
+    Err.Clear
+    If fso.FileExists(configPath) Then fso.DeleteFile configPath, True
+    If fso.FileExists(bodyPath) Then fso.DeleteFile bodyPath, True
+    If fso.FileExists(headerPath) Then fso.DeleteFile headerPath, True
+    Set file = Nothing
+    Set fso = Nothing
+    Set shell = Nothing
+    On Error GoTo 0
 End Function
 
 Dim abuseError, abuseStatus, abuseRequestError
