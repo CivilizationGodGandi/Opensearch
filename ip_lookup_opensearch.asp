@@ -173,7 +173,7 @@ If ip <> "" Then
             wafCount = fwCount
             Err.Clear
         ElseIf osExitCode <> 0 Then
-            fwCount = "조회 실패: HTTPS 호출 오류 " & osExitCode & " " & Left(osStderr, 200)
+            fwCount = "조회 실패: HTTPS 호출 오류 " & osExitCode & " " & Left(Replace(osStderr, Chr(0), ""), 500)
             wafCount = fwCount
         Else
             fwCount = extractJsonValue(osResult, "fwCount")

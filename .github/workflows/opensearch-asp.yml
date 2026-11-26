@@ -27,6 +27,7 @@ jobs:
           Import-Module WebAdministration
           New-Item -ItemType Directory -Force C:\inetpub\opensearch-lookup-ci | Out-Null
           New-WebAppPool -Name OpenSearchLookupCI | Out-Null
+          Set-ItemProperty IIS:\AppPools\OpenSearchLookupCI -Name processModel.loadUserProfile -Value $true
           New-Website -Name OpenSearchLookupCI -Port 18080 -PhysicalPath C:\inetpub\opensearch-lookup-ci -ApplicationPool OpenSearchLookupCI | Out-Null
           Set-WebConfigurationProperty -PSPath 'IIS:\' -Filter 'system.webServer/asp' -Location OpenSearchLookupCI -Name scriptErrorSentToBrowser -Value $true
           Set-WebConfigurationProperty -PSPath 'IIS:\' -Filter 'system.webServer/httpErrors' -Location OpenSearchLookupCI -Name errorMode -Value Detailed
