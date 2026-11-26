@@ -24,6 +24,12 @@ class Fixture(BaseHTTPRequestHandler):
         if '/_count?' in self.path:
             self.count_request()
             return
+        if STATE['case'] == 'abuse_unauthorized':
+            self.reply(401, {'errors': [{'detail': 'Invalid API key'}]})
+            return
+        if STATE['case'] == 'abuse_empty':
+            self.reply(200, {'data': {}})
+            return
         ip = parse_qs(urlparse(self.path).query)['ipAddress'][0]
         result = {'data': {
             'ipAddress': ip, 'abuseConfidenceScore': 75, 'countryCode': 'KR',
@@ -88,7 +94,7 @@ def main():
         asp = asp.replace('https://222.233.121.38:9200', f'https://127.0.0.1:{https.server_port}')
         (ROOT / 'ip_lookup_opensearch.asp').write_bytes(asp.encode('cp949'))
         try:
-            for case in ['normal', 'zero', 'unauthorized', 'shard_failure', 'missing_count']:
+            for case in ['normal', 'zero', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
                 STATE['case'] = case
                 STATE['requests'] = []
                 url = 'http://127.0.0.1:18080/ip_lookup_opensearch.asp?ip=203.0.113.9'
@@ -98,10 +104,15 @@ def main():
                 except HTTPError as error:
                     print(error.read().decode('cp949', errors='replace'))
                     raise
-                assert 'TEST ISP' in html and 'example.test' in html, html
-                assert '75 / 100' in html and '>99<' in html and '>12<' in html, html
+                if case.startswith('abuse_'):
+                    expected_abuse = 'AbuseIPDB 조회 실패 HTTP 401' if case == 'abuse_unauthorized' else 'AbuseIPDB 조회 실패: IP 응답 없음'
+                    assert expected_abuse in html and '203.0.113.9' in html, html
+                    assert '▶ ISP' in html and '▶ 국가 코드' in html, html
+                else:
+                    assert 'TEST ISP' in html and 'example.test' in html, html
+                    assert '75 / 100' in html and '>99<' in html and '>12<' in html, html
                 assert len(STATE['requests']) == 2, html
-                if case == 'normal':
+                if case in ['normal', 'abuse_unauthorized', 'abuse_empty']:
                     assert '방화벽 탐지 횟수: 123건' in html, html
                     assert '웹방화벽 탐지 횟수: 456건' in html, html
                 elif case == 'zero':
@@ -118,7 +129,7 @@ def main():
             http.shutdown()
             https.shutdown()
             (HERE / 'tests/test-report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    print('Passed 5 real IIS Classic ASP cases; optional client TLS certificates; count-only responses.')
+    print('Passed 7 real IIS Classic ASP cases; optional client TLS certificates; count-only responses.')
 
 
 if __name__ == '__main__':

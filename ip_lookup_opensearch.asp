@@ -57,6 +57,7 @@ Function encodePowerShell(value)
     Set stream = Nothing
 End Function
 
+Dim abuseError, abuseStatus, abuseRequestError
 Dim ip, ipAddress, abuseScore, countryCode, usageType, isp, domain, totalReports, distinctUsers, lastReportedAt, isTor, fullLog, wafReason, wafAction, aiResponse, topKoreanRule
 ip = Request.QueryString("ip")
 
@@ -66,15 +67,30 @@ If ip <> "" Then
     apiKey = "ABUSEIPDB_API_KEY"
     url = "https://api.abuseipdb.com/api/v2/check?ipAddress=" & Server.URLEncode(ip) & "&maxAgeInDays=90"
 
+    abuseError = ""
+    abuseStatus = 0
+    result = ""
+    On Error Resume Next
+    Err.Clear
     Set http = Server.CreateObject("MSXML2.ServerXMLHTTP")
+    http.setTimeouts 5000, 5000, 10000, 10000
     http.Open "GET", url, False
     http.setRequestHeader "Key", apiKey
     http.setRequestHeader "Accept", "application/json"
     http.Send
-    result = http.responseText
+    If Err.Number = 0 Then
+        abuseStatus = http.Status
+        result = http.responseText
+    End If
+    abuseRequestError = Err.Description
+    If Err.Number <> 0 Then
+        abuseError = "AbuseIPDB 조회 실패: " & abuseRequestError
+        Err.Clear
+    ElseIf abuseStatus <> 200 Then
+        abuseError = "AbuseIPDB 조회 실패 HTTP " & abuseStatus
+    End If
     Set http = Nothing
-
-
+    On Error GoTo 0
 
     ipAddress      = extractJsonValue(result, "ipAddress")
     abuseScore     = extractJsonValue(result, "abuseConfidenceScore")
@@ -87,7 +103,16 @@ If ip <> "" Then
     lastReportedAt = extractJsonValue(result, "lastReportedAt")
     isTor          = extractJsonValue(result, "isTor")
 
+    If ipAddress = "" Then
+        ipAddress = ip
+        If abuseError = "" Then abuseError = "AbuseIPDB 조회 실패: IP 응답 없음"
+    End If
+
+
     Dim riskText, riskColor, riskShake
+    riskText = "조회 실패"
+    riskColor = "gray"
+    riskShake = ""
     If abuseScore <> "" Then
         If CLng(abuseScore) <= 30 Then
             riskText = "낮음"
@@ -122,6 +147,8 @@ If ip <> "" Then
     psScript = psScript & "$client = New-Object OsCountClient" & vbLf
     psScript = psScript & "$client.Proxy = $null" & vbLf
     psScript = psScript & "$client.Headers['Authorization'] = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cfg.user + ':' + $cfg.password))" & vbLf
+    psScript = psScript & "$parsedIP = $null; if (-not [Net.IPAddress]::TryParse([string]$cfg.ip, [ref]$parsedIP)) { throw 'INVALID_IP' }" & vbLf
+    psScript = psScript & "$cfg.ip = $parsedIP.ToString()" & vbLf
     psScript = psScript & "$result = @{}" & vbLf
     psScript = psScript & "foreach ($name in @('fwCount','wafCount')) {" & vbLf
     psScript = psScript & "    try {" & vbLf
@@ -254,8 +281,12 @@ End If
 
     <h2 style="margin-top: 30px;">wow 페이지 출발지 IP DB 내역 호출 및 AI 분석 내역</h2>
 
+    <% If abuseError <> "" Then %>
+    <div style="color:red;"><%=Server.HTMLEncode(abuseError)%></div>
+    <% End If %>
+
     <table class="result-table">
-        <tr><td class="label">▶ IP 주소</td><td><%=ipAddress%></td></tr>
+        <tr><td class="label">▶ IP 주소</td><td><%=Server.HTMLEncode(ipAddress)%></td></tr>
         <tr><td class="label">▶ 위험도 점수</td><td style="color:<%=riskColor%>; <%=riskShake%>"><%=abuseScore%> / 100</td></tr>
         <tr><td class="label">▶ 국가 코드</td><td><%=countryCode%></td></tr>
         <tr><td class="label">▶ 사용 유형</td><td><%=usageType%></td></tr>
