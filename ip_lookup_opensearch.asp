@@ -272,12 +272,12 @@ If ip <> "" Then
 	
     ' ===== OpenSearch 건수만 조회 =====
     Dim osBaseUrl, osUser, osPassword, fwCount, wafCount
-    osBaseUrl = "https://222.233.121.38:9200/wazuh-alerts-*"
+    osBaseUrl = "https://222.233.121.38:9200/wazuh-archives-*"
     osUser = "admin"
     osPassword = "SecretPassword"
 
-    fwCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "data.type:""traffic""")
-    wafCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "decoder.name:""Monitorapp-data""")
+    fwCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "location:""210.116.108.137""")
+    wafCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "location:""210.116.108.249""")
 
     ' ===== AI 호출 =====
     If wafReason <> "" Then

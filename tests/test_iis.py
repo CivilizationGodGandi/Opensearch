@@ -40,11 +40,11 @@ class Fixture(BaseHTTPRequestHandler):
         self.reply(200, result)
 
     def count_request(self):
-        assert self.path.startswith('/wazuh-alerts-*/_count?')
+        assert self.path.startswith('/wazuh-archives-*/_count?')
         expected = 'Basic ' + base64.b64encode(b'admin:SecretPassword').decode()
         assert self.headers['Authorization'] == expected
         query = parse_qs(urlparse(self.path).query)['q'][0]
-        assert query in ['data.srcip:"203.0.113.9" AND data.type:"traffic"', 'data.srcip:"203.0.113.9" AND decoder.name:"Monitorapp-data"']
+        assert query in ['data.srcip:"203.0.113.9" AND location:"210.116.108.137"', 'data.srcip:"203.0.113.9" AND location:"210.116.108.249"']
         STATE['requests'].append(query)
         case = STATE['case']
         if case == 'unauthorized':
@@ -54,7 +54,7 @@ class Fixture(BaseHTTPRequestHandler):
         elif case == 'missing_count':
             self.reply(200, {'_shards': {'failed': 0}})
         else:
-            count = 0 if case == 'zero' else (123 if 'data.type:' in query else 456)
+            count = 0 if case == 'zero' else (123 if '210.116.108.137' in query else 456)
             self.reply(200, {'count': count, '_shards': {'failed': 0}})
 
     def reply(self, status, data):
