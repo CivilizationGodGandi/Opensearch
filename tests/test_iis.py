@@ -11,7 +11,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import urlopen
 
 HERE = Path(__file__).resolve().parent.parent
@@ -60,9 +60,9 @@ class Fixture(BaseHTTPRequestHandler):
         ])
 
     def count_request(self):
-        index = urlparse(self.path).path.split('/')[1]
+        index = unquote(urlparse(self.path).path).split('/')[1]
         assert index in ['wazuh-archives-4.x-2026.11.26', 'wazuh-archives-4.x-2026.11.25']
-        assert self.path.startswith('/' + index + '/_search?')
+        assert unquote(self.path).startswith('/' + index + '/_search?'), self.path
         params = parse_qs(urlparse(self.path).query)
         assert params['size'] == ['0']
         assert params['track_total_hits'] == ['true']
