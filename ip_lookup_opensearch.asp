@@ -53,11 +53,10 @@ Function windowsArg(value)
 End Function
 
 Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
-    Dim shell, fso, curlPath, bodyPath, headerPath, errorPath, workDir, file, process
+    Dim shell, fso, curlPath, bodyPath, headerPath, errorPath, folder, file
     Dim command, query, exitCode, status, body, headers, detail, countValue
-    Dim checkIP, matches, stage, poolName, authHeader, aclCommand, createdDir, waitStarted, tempPath
-    workDir = ""
-    createdDir = False
+    Dim checkIP, matches, stage, authHeader, tempPath, createdFiles
+    createdFiles = ""
     getOpenSearchCount = "조회 실패: 응답 없음"
     Set checkIP = New RegExp
     checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
@@ -76,57 +75,28 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         stage = "파일 객체 생성"
         Set fso = Server.CreateObject("Scripting.FileSystemObject")
         If Err.Number <> 0 Then Exit Do
-        stage = "요청 폴더 생성"
-        workDir = fso.BuildPath(shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Temp", "os_" & fso.GetTempName)
+        stage = "결과 경로 생성"
+        folder = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Temp"
+        bodyPath = fso.BuildPath(folder, fso.GetTempName)
         If Err.Number <> 0 Then Exit Do
-        fso.CreateFolder workDir
+        headerPath = fso.BuildPath(folder, fso.GetTempName)
         If Err.Number <> 0 Then Exit Do
-        createdDir = True
-
-        stage = "앱 풀 이름 확인"
-        poolName = Request.ServerVariables("APP_POOL_ID")
-        If poolName = "" Then
-            getOpenSearchCount = "조회 실패 [앱 풀 이름 확인]"
-            Exit Do
-        End If
-
-        stage = "요청 폴더 접근 설정"
-        aclCommand = windowsArg(shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\icacls.exe")
-        aclCommand = aclCommand & " " & windowsArg(workDir) & " /grant "
-        aclCommand = aclCommand & windowsArg("IIS AppPool\" & poolName & ":(OI)(CI)M")
-        Set process = shell.Exec(aclCommand)
+        errorPath = fso.BuildPath(folder, fso.GetTempName)
         If Err.Number <> 0 Then Exit Do
-        detail = process.StdOut.ReadAll
-        If Err.Number <> 0 Then Exit Do
-        detail = detail & process.StdErr.ReadAll
-        If Err.Number <> 0 Then Exit Do
-        waitStarted = Timer
-        Do While process.Status = 0
-            If Timer < waitStarted Or Timer - waitStarted > 2 Then Exit Do
-        Loop
-        If process.Status = 0 Then
-            getOpenSearchCount = "조회 실패 [요청 폴더 접근 설정]: 실행 대기 초과"
-            Exit Do
-        End If
-        If process.ExitCode <> 0 Then
-            getOpenSearchCount = "조회 실패 [요청 폴더 접근 설정]: " & Left(detail, 300)
-            Exit Do
-        End If
-
-        bodyPath = fso.BuildPath(workDir, "body.tmp")
-        headerPath = fso.BuildPath(workDir, "header.tmp")
-        errorPath = fso.BuildPath(workDir, "error.tmp")
         stage = "결과 파일 생성"
         For Each tempPath In Array(bodyPath, headerPath, errorPath)
             Set file = fso.CreateTextFile(tempPath, False)
             If Err.Number <> 0 Then Exit For
+            createdFiles = createdFiles & Chr(1) & tempPath
             file.Close
             If Err.Number <> 0 Then Exit For
         Next
         If Err.Number <> 0 Then Exit Do
 
+        stage = "curl 경로 확인"
         curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\curl.exe"
         If Not fso.FileExists(curlPath) Then curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Sysnative\curl.exe"
+        If Err.Number <> 0 Then Exit Do
         If Not fso.FileExists(curlPath) Then
             getOpenSearchCount = "조회 실패: Windows 기본 curl.exe 없음"
             Exit Do
@@ -149,16 +119,13 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         exitCode = shell.Run(command, 0, True)
         If Err.Number <> 0 Then Exit Do
         If exitCode <> 0 Then
-            detail = ""
-            stage = "curl 오류 읽기"
-            If fso.FileExists(errorPath) Then
-                Set file = fso.OpenTextFile(errorPath, 1)
-                If Err.Number <> 0 Then Exit Do
-                detail = file.ReadAll
-                If Err.Number <> 0 Then Exit Do
-                file.Close
-                If Err.Number <> 0 Then Exit Do
-            End If
+            stage = "curl 오류 파일 열기"
+            Set file = fso.OpenTextFile(errorPath, 1)
+            If Err.Number <> 0 Then Exit Do
+            detail = file.ReadAll
+            If Err.Number <> 0 Then Exit Do
+            file.Close
+            If Err.Number <> 0 Then Exit Do
             getOpenSearchCount = "조회 실패 CURL " & exitCode & ": " & Left(Trim(detail), 500)
             Exit Do
         End If
@@ -186,7 +153,9 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         If Err.Number <> 0 Then Exit Do
         status = ""
         If matches.Count > 0 Then status = matches(matches.Count - 1).SubMatches(0)
-        If status <> "200" Then
+        If status = "" Then
+            getOpenSearchCount = "조회 실패: HTTP 응답 헤더 없음"
+        ElseIf status <> "200" Then
             getOpenSearchCount = "조회 실패: ERROR HTTP " & status
         ElseIf extractJsonValue(body, "failed") <> "0" Then
             getOpenSearchCount = "조회 실패: ERROR SHARD_FAILURE"
@@ -203,11 +172,14 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
     If Err.Number <> 0 Then getOpenSearchCount = "조회 실패 [" & stage & " / " & Hex(Err.Number) & "]: " & Err.Description
     Err.Clear
     If IsObject(file) Then file.Close
-    If IsObject(fso) And createdDir Then
-        If fso.FolderExists(workDir) Then fso.DeleteFolder workDir, True
+    If IsObject(fso) Then
+        For Each tempPath In Split(createdFiles, Chr(1))
+            If tempPath <> "" Then
+                If fso.FileExists(tempPath) Then fso.DeleteFile tempPath, True
+            End If
+        Next
     End If
     Set file = Nothing
-    Set process = Nothing
     Set fso = Nothing
     Set shell = Nothing
     Err.Clear
