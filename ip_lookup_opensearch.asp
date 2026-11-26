@@ -55,8 +55,9 @@ End Function
 Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
     Dim shell, fso, curlPath, bodyPath, headerPath, errorPath, workDir, file, process
     Dim command, query, exitCode, status, body, headers, detail, countValue
-    Dim checkIP, matches, stage, identityText, callerSid, poolName, authHeader, aclCommand
+    Dim checkIP, matches, stage, identityText, callerSid, poolName, authHeader, aclCommand, createdDir
     workDir = ""
+    createdDir = False
     getOpenSearchCount = "조회 실패: 응답 없음"
     Set checkIP = New RegExp
     checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
@@ -80,6 +81,7 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
         If Err.Number <> 0 Then Exit Do
         fso.CreateFolder workDir
         If Err.Number <> 0 Then Exit Do
+        createdDir = True
 
         stage = "실행 계정 확인"
         Set process = shell.Exec(windowsArg(shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\whoami.exe") & " /user /fo csv /nh")
@@ -197,7 +199,7 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
     If Err.Number <> 0 Then getOpenSearchCount = "조회 실패 [" & stage & " / " & Hex(Err.Number) & "]: " & Err.Description
     Err.Clear
     If IsObject(file) Then file.Close
-    If IsObject(fso) And workDir <> "" Then
+    If IsObject(fso) And createdDir Then
         If fso.FolderExists(workDir) Then fso.DeleteFolder workDir, True
     End If
     Set file = Nothing
