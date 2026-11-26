@@ -98,6 +98,13 @@ def main():
         (ROOT / 'ip_lookup_opensearch.asp').write_bytes(asp.encode('cp949'))
         asp = asp.replace('https://222.233.121.38:9200', f'https://127.0.0.1:{https.server_port}')
         (ROOT / 'ip_lookup_opensearch.asp').write_bytes(asp.encode('cp949'))
+        probe = '<%@ Language=VBScript %><% On Error Resume Next : Dim fso, f : Set fso=Server.CreateObject("Scripting.FileSystemObject") : Set f=fso.OpenTextFile(Server.MapPath("missing-file.txt"),1) : Dim firstError : firstError=Err.Number : Dim data : data=f.ReadAll : Response.Write firstError & ":" & Err.Number %>'
+        (ROOT / 'probe.asp').write_text(probe, encoding='ascii')
+        with urlopen('http://127.0.0.1:18080/probe.asp') as response:
+            masked = response.read().decode('ascii')
+        assert masked == '53:424', masked
+        print('REPRODUCED: file-open error 53 overwritten by Object required 424', flush=True)
+        report.append({'case': 'object_required_mask_reproduced', 'status': 'passed'})
         try:
             for case in ['normal', 'zero', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
                 STATE['case'] = case
@@ -130,6 +137,15 @@ def main():
                     assert '탐지 횟수: 0건' not in html, html
                 report.append({'case': case, 'status': 'passed', 'requests': len(STATE['requests'])})
                 print('PASSED:', case, flush=True)
+            broken = asp.replace('Set file = fso.OpenTextFile(bodyPath, 1)', 'Set file = fso.OpenTextFile(bodyPath & ".missing", 1)')
+            (ROOT / 'broken.asp').write_bytes(broken.encode('cp949'))
+            STATE['case'] = 'normal'
+            with urlopen('http://127.0.0.1:18080/broken.asp?ip=203.0.113.9', timeout=70) as response:
+                html = response.read().decode('cp949')
+            assert html.count('본문 파일 열기 / 35') == 2, html
+            assert '개체가 필요합니다' not in html and 'Object required' not in html, html
+            report.append({'case': 'original_file_error_preserved', 'status': 'passed'})
+            print('PASSED: file-open failure reports original stage/code; no Object required masking', flush=True)
         finally:
             http.shutdown()
             https.shutdown()

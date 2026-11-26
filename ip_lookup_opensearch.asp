@@ -53,10 +53,11 @@ Function windowsArg(value)
 End Function
 
 Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
-    Dim shell, fso, curlPath, bodyPath, headerPath, errorPath, folder, file
+    Dim shell, fso, curlPath, bodyPath, headerPath, errorPath, workDir, file, process
     Dim command, query, exitCode, status, body, headers, detail, countValue
-    Dim checkIP, matches, requestError
-
+    Dim checkIP, matches, stage, identityText, callerSid, poolName, authHeader, aclCommand
+    workDir = ""
+    getOpenSearchCount = "조회 실패: 응답 없음"
     Set checkIP = New RegExp
     checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
     If Not checkIP.Test(sourceIP) Then
@@ -67,50 +68,116 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
 
     On Error Resume Next
     Err.Clear
-    Set shell = Server.CreateObject("WScript.Shell")
-    Set fso = Server.CreateObject("Scripting.FileSystemObject")
-    folder = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Temp"
-    bodyPath = fso.BuildPath(folder, fso.GetTempName)
-    headerPath = fso.BuildPath(folder, fso.GetTempName)
-    errorPath = fso.BuildPath(folder, fso.GetTempName)
-    curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\curl.exe"
-    If Not fso.FileExists(curlPath) Then curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Sysnative\curl.exe"
+    Do
+        stage = "실행 객체 생성"
+        Set shell = Server.CreateObject("WScript.Shell")
+        If Err.Number <> 0 Then Exit Do
+        stage = "파일 객체 생성"
+        Set fso = Server.CreateObject("Scripting.FileSystemObject")
+        If Err.Number <> 0 Then Exit Do
+        stage = "요청 폴더 생성"
+        workDir = fso.BuildPath(shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Temp", "os_" & fso.GetTempName)
+        If Err.Number <> 0 Then Exit Do
+        fso.CreateFolder workDir
+        If Err.Number <> 0 Then Exit Do
 
-    command = windowsArg(curlPath) & " --disable --silent --show-error --insecure --ssl-no-revoke"
-    command = command & " --tlsv1.2 --tls-max 1.2 --globoff --proxy " & windowsArg("")
-    command = command & " --connect-timeout 5 --max-time 20 --get"
-    command = command & " --header " & windowsArg("Authorization: " & basicAuth(userName & ":" & password))
-    command = command & " --url " & windowsArg(baseUrl & "/_count")
-    command = command & " --data-urlencode " & windowsArg("filter_path=count,_shards.failed,error")
-    command = command & " --data-urlencode " & windowsArg("q=" & query)
-    command = command & " --output " & windowsArg(bodyPath)
-    command = command & " --dump-header " & windowsArg(headerPath)
-    command = command & " --stderr " & windowsArg(errorPath)
-
-    If Err.Number = 0 Then exitCode = shell.Run(command, 0, True)
-    If Err.Number = 0 And exitCode = 0 Then
-        Set file = fso.OpenTextFile(bodyPath, 1)
-        body = file.ReadAll
-        file.Close
-        Set file = fso.OpenTextFile(headerPath, 1)
-        headers = file.ReadAll
-        file.Close
-    End If
-    requestError = Err.Description
-    If Err.Number <> 0 Then
-        getOpenSearchCount = "조회 실패: " & requestError
-    ElseIf exitCode <> 0 Then
-        detail = ""
-        If fso.FileExists(errorPath) Then
-            Set file = fso.OpenTextFile(errorPath, 1)
-            detail = file.ReadAll
-            file.Close
+        stage = "실행 계정 확인"
+        Set process = shell.Exec(windowsArg(shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\whoami.exe") & " /user /fo csv /nh")
+        If Err.Number <> 0 Then Exit Do
+        identityText = process.StdOut.ReadAll
+        If Err.Number <> 0 Then Exit Do
+        checkIP.Pattern = "S-[0-9]+(-[0-9]+)+"
+        Set matches = checkIP.Execute(identityText)
+        If Err.Number <> 0 Then Exit Do
+        If process.ExitCode <> 0 Or matches.Count = 0 Then
+            getOpenSearchCount = "조회 실패 [실행 계정 확인]"
+            Exit Do
         End If
-        getOpenSearchCount = "조회 실패 CURL " & exitCode & ": " & Left(Trim(detail), 500)
-    Else
+        callerSid = matches(0).Value
+        poolName = Request.ServerVariables("APP_POOL_ID")
+        If poolName = "" Then
+            getOpenSearchCount = "조회 실패 [앱 풀 이름 확인]"
+            Exit Do
+        End If
+
+        stage = "요청 폴더 접근 설정"
+        aclCommand = windowsArg(shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\icacls.exe")
+        aclCommand = aclCommand & " " & windowsArg(workDir) & " /inheritance:r /grant:r"
+        aclCommand = aclCommand & " " & windowsArg("*" & callerSid & ":(OI)(CI)F")
+        aclCommand = aclCommand & " " & windowsArg("IIS AppPool\" & poolName & ":(OI)(CI)M")
+        aclCommand = aclCommand & " " & windowsArg("*S-1-5-18:(OI)(CI)F")
+        aclCommand = aclCommand & " " & windowsArg("*S-1-5-32-544:(OI)(CI)F")
+        Set process = shell.Exec(aclCommand)
+        If Err.Number <> 0 Then Exit Do
+        detail = process.StdOut.ReadAll
+        If Err.Number <> 0 Then Exit Do
+        If process.ExitCode <> 0 Then
+            getOpenSearchCount = "조회 실패 [요청 폴더 접근 설정]: " & Left(detail, 300)
+            Exit Do
+        End If
+
+        bodyPath = fso.BuildPath(workDir, "body.tmp")
+        headerPath = fso.BuildPath(workDir, "header.tmp")
+        errorPath = fso.BuildPath(workDir, "error.tmp")
+        curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\curl.exe"
+        If Not fso.FileExists(curlPath) Then curlPath = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\Sysnative\curl.exe"
+        If Not fso.FileExists(curlPath) Then
+            getOpenSearchCount = "조회 실패: Windows 기본 curl.exe 없음"
+            Exit Do
+        End If
+        stage = "인증 헤더 생성"
+        authHeader = basicAuth(userName & ":" & password)
+        If Err.Number <> 0 Then Exit Do
+        command = windowsArg(curlPath) & " --disable --silent --show-error --insecure --ssl-no-revoke"
+        command = command & " --tlsv1.2 --tls-max 1.2 --globoff --proxy " & windowsArg("")
+        command = command & " --connect-timeout 5 --max-time 20 --get"
+        command = command & " --header " & windowsArg("Authorization: " & authHeader)
+        command = command & " --url " & windowsArg(baseUrl & "/_count")
+        command = command & " --data-urlencode " & windowsArg("filter_path=count,_shards.failed,error")
+        command = command & " --data-urlencode " & windowsArg("q=" & query)
+        command = command & " --output " & windowsArg(bodyPath)
+        command = command & " --dump-header " & windowsArg(headerPath)
+        command = command & " --stderr " & windowsArg(errorPath)
+
+        stage = "curl 실행"
+        exitCode = shell.Run(command, 0, True)
+        If Err.Number <> 0 Then Exit Do
+        If exitCode <> 0 Then
+            detail = ""
+            stage = "curl 오류 읽기"
+            If fso.FileExists(errorPath) Then
+                Set file = fso.OpenTextFile(errorPath, 1)
+                If Err.Number <> 0 Then Exit Do
+                detail = file.ReadAll
+                If Err.Number <> 0 Then Exit Do
+                file.Close
+                If Err.Number <> 0 Then Exit Do
+            End If
+            getOpenSearchCount = "조회 실패 CURL " & exitCode & ": " & Left(Trim(detail), 500)
+            Exit Do
+        End If
+
+        stage = "본문 파일 열기"
+        Set file = fso.OpenTextFile(bodyPath, 1)
+        If Err.Number <> 0 Then Exit Do
+        stage = "본문 읽기"
+        body = file.ReadAll
+        If Err.Number <> 0 Then Exit Do
+        file.Close
+        If Err.Number <> 0 Then Exit Do
+        stage = "헤더 파일 열기"
+        Set file = fso.OpenTextFile(headerPath, 1)
+        If Err.Number <> 0 Then Exit Do
+        headers = file.ReadAll
+        If Err.Number <> 0 Then Exit Do
+        file.Close
+        If Err.Number <> 0 Then Exit Do
+
+        stage = "건수 응답 처리"
         checkIP.Pattern = "HTTP/[0-9.]+\s+([0-9]{3})"
         checkIP.Global = True
         Set matches = checkIP.Execute(headers)
+        If Err.Number <> 0 Then Exit Do
         status = ""
         If matches.Count > 0 Then status = matches(matches.Count - 1).SubMatches(0)
         If status <> "200" Then
@@ -125,15 +192,19 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery)
                 getOpenSearchCount = countValue
             End If
         End If
-    End If
+    Loop While False
 
+    If Err.Number <> 0 Then getOpenSearchCount = "조회 실패 [" & stage & " / " & Hex(Err.Number) & "]: " & Err.Description
     Err.Clear
-    If fso.FileExists(bodyPath) Then fso.DeleteFile bodyPath, True
-    If fso.FileExists(headerPath) Then fso.DeleteFile headerPath, True
-    If fso.FileExists(errorPath) Then fso.DeleteFile errorPath, True
+    If IsObject(file) Then file.Close
+    If IsObject(fso) And workDir <> "" Then
+        If fso.FolderExists(workDir) Then fso.DeleteFolder workDir, True
+    End If
     Set file = Nothing
+    Set process = Nothing
     Set fso = Nothing
     Set shell = Nothing
+    Err.Clear
     On Error GoTo 0
 End Function
 
