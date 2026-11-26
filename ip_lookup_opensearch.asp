@@ -47,23 +47,45 @@ Function remainingSeconds(startedAt)
     remainingSeconds = 10 - elapsed
 End Function
 
-Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery, startedAt)
-    Dim shell, fso, root, workDir, createdDir, bodyPath, errorPath
-    Dim curlPath, command, query, url, code, body, detail, countValue, checkIP, poolName, remaining
-    getOpenSearchCount = "조회 실패"
-    createdDir = False
-    If remainingSeconds(startedAt) <= 0 Then
-        getOpenSearchCount = "시간 초과"
-        Exit Function
-    End If
-    Set checkIP = New RegExp
-    checkIP.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
-    If Not checkIP.Test(sourceIP) Then
-        getOpenSearchCount = "조회 실패: 올바르지 않은 IP"
-        Exit Function
-    End If
+Function openSearchJSON(url, userName, password, shell, fso, curlPath, workDir, startedAt, ByRef code)
+    Dim remaining, command, bodyPath
+    openSearchJSON = ""
+    code = 28
+    remaining = remainingSeconds(startedAt)
+    If remaining <= 0 Then Exit Function
+    bodyPath = fso.BuildPath(workDir, "body.tmp")
+    command = windowsArg(curlPath) & " --disable --silent --show-error --fail --insecure --ssl-no-revoke"
+    command = command & " --tlsv1.2 --tls-max 1.2 --globoff --proxy " & windowsArg("")
+    command = command & " --connect-timeout 5 --max-time " & Replace(CStr(remaining), ",", ".")
+    command = command & " --user " & windowsArg(userName & ":" & password) & " --url " & windowsArg(url)
+    command = command & " --output " & windowsArg(bodyPath) & " --stderr " & windowsArg(workDir & "\error.tmp")
+    code = shell.Run(command, 0, True)
+    If code = 0 Then openSearchJSON = readTextFile(fso, bodyPath)
+End Function
 
-    query = "data.srcip:" & Chr(34) & sourceIP & Chr(34) & " AND " & deviceQuery
+Sub getOpenSearchCounts(baseUrl, userName, password, sourceIP, ByRef fwCount, ByRef wafCount)
+    Dim shell, fso, root, workDir, createdDir, curlPath, startedAt
+    Dim command, code, url, rootUrl, pattern, body, regex, indices, entry
+    Dim totals(1), finished(1), devices, device, countValue, query, indexCount, received, fatalMessage
+    fwCount = "0+"
+    wafCount = "0+"
+    totals(0) = 0
+    totals(1) = 0
+    finished(0) = 0
+    finished(1) = 0
+    indexCount = -1
+    received = 0
+    fatalMessage = ""
+    createdDir = False
+    startedAt = Timer
+    devices = Array("210.116.108.137", "210.116.108.249")
+    Set regex = New RegExp
+    regex.Pattern = "^[0-9A-Fa-f:.]{2,45}$"
+    If Not regex.Test(sourceIP) Then
+        fwCount = "조회 실패: 올바르지 않은 IP"
+        wafCount = fwCount
+        Exit Sub
+    End If
 
     On Error Resume Next
     Err.Clear
@@ -79,69 +101,74 @@ Function getOpenSearchCount(baseUrl, userName, password, sourceIP, deviceQuery, 
         If Err.Number <> 0 Then Exit Do
         If code <> 0 Then Exit Do
         createdDir = True
-
         command = windowsArg(root & "\System32\icacls.exe") & " " & windowsArg(workDir)
         command = command & " /grant " & windowsArg("*S-1-5-17:(OI)(CI)M")
-        poolName = Request.ServerVariables("APP_POOL_ID")
-        If poolName <> "" Then command = command & " " & windowsArg("IIS AppPool\" & poolName & ":(OI)(CI)M")
+        If Request.ServerVariables("APP_POOL_ID") <> "" Then command = command & " " & windowsArg("IIS AppPool\" & Request.ServerVariables("APP_POOL_ID") & ":(OI)(CI)M")
         code = shell.Run(command, 0, True)
         If Err.Number <> 0 Then Exit Do
         If code <> 0 Then Exit Do
-
-        bodyPath = fso.BuildPath(workDir, "body.tmp")
-        errorPath = fso.BuildPath(workDir, "error.tmp")
         curlPath = root & "\System32\curl.exe"
         If Not fso.FileExists(curlPath) Then curlPath = root & "\Sysnative\curl.exe"
         If Err.Number <> 0 Then Exit Do
-        remaining = remainingSeconds(startedAt)
-        If remaining <= 0 Then
-            getOpenSearchCount = "시간 초과"
-            Exit Do
-        End If
-        url = baseUrl & "/_search?size=0&track_total_hits=true&timeout=" & CLng(remaining * 800) & "ms&allow_partial_search_results=true&q=" & Server.URLEncode(query) & "&filter_path=timed_out,hits.total,_shards.failed,error"
-        command = windowsArg(curlPath) & " --disable --silent --show-error --fail --insecure --ssl-no-revoke"
-        command = command & " --tlsv1.2 --tls-max 1.2 --globoff --proxy " & windowsArg("")
-        command = command & " --connect-timeout 5 --max-time " & Replace(CStr(remaining), ",", ".") & " --get"
-        command = command & " --user " & windowsArg(userName & ":" & password)
-        command = command & " --url " & windowsArg(url)
-        command = command & " --output " & windowsArg(bodyPath) & " --stderr " & windowsArg(errorPath)
-        code = shell.Run(command, 0, True)
+
+        rootUrl = Left(baseUrl, InStrRev(baseUrl, "/") - 1)
+        pattern = Mid(baseUrl, InStrRev(baseUrl, "/") + 1)
+        url = rootUrl & "/_cat/indices/" & pattern & "?format=json&h=index&s=index:desc&expand_wildcards=open"
+        body = openSearchJSON(url, userName, password, shell, fso, curlPath, workDir, startedAt, code)
         If Err.Number <> 0 Then Exit Do
-        If code = 28 Then
-            getOpenSearchCount = "시간 초과"
+        If code = 28 Then Exit Do
+        If code <> 0 Then
+            fatalMessage = "조회 실패 CURL " & code
             Exit Do
         End If
-        If code <> 0 Then
-            detail = readTextFile(fso, errorPath)
-            If Err.Number <> 0 Then Exit Do
-            getOpenSearchCount = "조회 실패 CURL " & code & ": " & Left(Trim(detail), 500)
+        regex.Pattern = """index""\s*:\s*""([^""]+)"""
+        regex.Global = True
+        Set indices = regex.Execute(body)
+        indexCount = indices.Count
+        If indexCount = 0 And Trim(body) <> "[]" Then
+            fatalMessage = "조회 실패: 인덱스 목록 응답 오류"
             Exit Do
         End If
 
-        body = readTextFile(fso, bodyPath)
-        If Err.Number <> 0 Then Exit Do
-        countValue = extractJsonValue(body, "value")
-        checkIP.Pattern = """timed_out""\s*:\s*true"
-        If extractJsonValue(body, "failed") <> "0" And Not checkIP.Test(body) Then
-            getOpenSearchCount = "조회 실패: ERROR SHARD_FAILURE"
-        ElseIf countValue = "" Then
-            getOpenSearchCount = "조회 실패: ERROR INVALID_COUNT"
-        Else
-            getOpenSearchCount = countValue
-            If checkIP.Test(body) Or extractJsonValue(body, "relation") = "gte" Then
-                getOpenSearchCount = countValue & "+"
-            End If
-        End If
+        For Each entry In indices
+            For device = 0 To 1
+                If remainingSeconds(startedAt) <= 0 Then Exit For
+                query = "data.srcip:" & Chr(34) & sourceIP & Chr(34) & " AND location:" & Chr(34) & devices(device) & Chr(34)
+                url = rootUrl & "/" & Server.URLEncode(entry.SubMatches(0)) & "/_search?size=0&track_total_hits=true&allow_partial_search_results=true"
+                url = url & "&timeout=" & CLng(remainingSeconds(startedAt) * 800) & "ms&q=" & Server.URLEncode(query)
+                url = url & "&filter_path=timed_out,hits.total,_shards.failed,error"
+                body = openSearchJSON(url, userName, password, shell, fso, curlPath, workDir, startedAt, code)
+                If Err.Number <> 0 Then Exit Do
+                If code = 0 Then
+                    countValue = extractJsonValue(body, "value")
+                    If countValue <> "" Then
+                        totals(device) = totals(device) + CDbl(countValue)
+                        received = received + 1
+                        regex.Pattern = """timed_out""\s*:\s*true"
+                        If Not regex.Test(body) And extractJsonValue(body, "relation") = "eq" And extractJsonValue(body, "failed") = "0" Then finished(device) = finished(device) + 1
+                    End If
+                End If
+            Next
+            If remainingSeconds(startedAt) <= 0 Then Exit For
+        Next
     Loop While False
 
-    If Err.Number <> 0 Then getOpenSearchCount = "조회 실패 [" & Hex(Err.Number) & "]: " & Err.Description
+    If Err.Number <> 0 Then fatalMessage = "조회 실패 [" & Hex(Err.Number) & "]: " & Err.Description
+    fwCount = FormatNumber(totals(0), 0, -1, 0, 0)
+    wafCount = FormatNumber(totals(1), 0, -1, 0, 0)
+    If indexCount < 0 Or finished(0) < indexCount Or fatalMessage <> "" Then fwCount = fwCount & "+"
+    If indexCount < 0 Or finished(1) < indexCount Or fatalMessage <> "" Then wafCount = wafCount & "+"
+    If fatalMessage <> "" And received = 0 Then
+        fwCount = fatalMessage
+        wafCount = fatalMessage
+    End If
     Err.Clear
     If createdDir Then shell.Run windowsArg(root & "\System32\cmd.exe") & " /d /q /c rmdir /s /q " & windowsArg(workDir), 0, True
     Set fso = Nothing
     Set shell = Nothing
     Err.Clear
     On Error GoTo 0
-End Function
+End Sub
 
 Dim abuseError, abuseStatus, abuseRequestError
 Dim ip, ipAddress, abuseScore, countryCode, usageType, isp, domain, totalReports, distinctUsers, lastReportedAt, isTor, fullLog, wafReason, wafAction, aiResponse, topKoreanRule
@@ -216,14 +243,12 @@ If ip <> "" Then
     End If
 	
     ' ===== OpenSearch 건수만 조회 =====
-    Dim osBaseUrl, osUser, osPassword, fwCount, wafCount, osStartedAt
+    Dim osBaseUrl, osUser, osPassword, fwCount, wafCount
     osBaseUrl = "https://222.233.121.38:9200/wazuh-archives-*"
     osUser = "admin"
     osPassword = "SecretPassword"
 
-    osStartedAt = Timer
-    fwCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "location:""210.116.108.137""", osStartedAt)
-    wafCount = getOpenSearchCount(osBaseUrl, osUser, osPassword, ipAddress, "location:""210.116.108.249""", osStartedAt)
+    Call getOpenSearchCounts(osBaseUrl, osUser, osPassword, ipAddress, fwCount, wafCount)
 
     ' ===== AI 호출 =====
     If wafReason <> "" Then

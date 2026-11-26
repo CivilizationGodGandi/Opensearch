@@ -21,6 +21,9 @@ STATE = {'case': 'normal', 'requests': []}
 
 class Fixture(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith('/_cat/indices/'):
+            self.catalog_request()
+            return
         if '/_search?' in self.path:
             self.count_request()
             return
@@ -39,40 +42,58 @@ class Fixture(BaseHTTPRequestHandler):
         }}
         self.reply(200, result)
 
+    def catalog_request(self):
+        assert self.path.startswith('/_cat/indices/wazuh-archives-*?')
+        params = parse_qs(urlparse(self.path).query)
+        assert params == {'format': ['json'], 'h': ['index'], 's': ['index:desc'], 'expand_wildcards': ['open']}
+        expected = 'Basic ' + base64.b64encode(b'admin:SecretPassword').decode()
+        assert self.headers['Authorization'] == expected
+        case = STATE['case']
+        if case == 'unauthorized':
+            self.reply(401, {'error': 'unauthorized'})
+            return
+        if case == 'slow_catalog':
+            time.sleep(21)
+        self.reply(200, [] if case == 'empty_indices' else [
+            {'index': 'wazuh-archives-4.x-2026.11.26'},
+            {'index': 'wazuh-archives-4.x-2026.11.25'},
+        ])
+
     def count_request(self):
-        assert self.path.startswith('/wazuh-archives-*/_search?')
+        index = urlparse(self.path).path.split('/')[1]
+        assert index in ['wazuh-archives-4.x-2026.11.26', 'wazuh-archives-4.x-2026.11.25']
+        assert self.path.startswith('/' + index + '/_search?')
         params = parse_qs(urlparse(self.path).query)
         assert params['size'] == ['0']
         assert params['track_total_hits'] == ['true']
         assert params['timeout'][0].endswith('ms')
-        assert 0 < int(params['timeout'][0][:-2]) <= 8000
+        assert 0 <= int(params['timeout'][0][:-2]) <= 8000
         assert params['allow_partial_search_results'] == ['true']
         assert params['filter_path'] == ['timed_out,hits.total,_shards.failed,error']
         expected = 'Basic ' + base64.b64encode(b'admin:SecretPassword').decode()
         assert self.headers['Authorization'] == expected
-        query = parse_qs(urlparse(self.path).query)['q'][0]
+        query = params['q'][0]
         assert query in ['data.srcip:"203.0.113.9" AND location:"210.116.108.137"', 'data.srcip:"203.0.113.9" AND location:"210.116.108.249"']
-        STATE['requests'].append(query)
+        STATE['requests'].append((index, query))
         case = STATE['case']
-        if case == 'slow_count' and '210.116.108.137' in query:
+        latest = index.endswith('2026.11.26')
+        fw = '210.116.108.137' in query
+        if case in ['slow_count', 'shared_deadline'] and not latest and fw:
             time.sleep(21)
-        if case == 'shared_deadline':
-            time.sleep(3 if '210.116.108.137' in query else 21)
-        if case == 'unauthorized':
-            self.reply(401, {'error': 'unauthorized'})
-        elif case == 'shard_failure':
-            self.reply(200, {'timed_out': False, 'hits': {'total': {'value': 999, 'relation': 'eq'}}, '_shards': {'failed': 1}})
-        elif case == 'missing_count':
+        if case == 'shared_deadline' and latest and fw:
+            time.sleep(3)
+        if case == 'missing_count' and latest and fw:
             self.reply(200, {'timed_out': False, '_shards': {'failed': 0}})
-        else:
-            count = 0 if case == 'zero' else (123 if '210.116.108.137' in query else 456)
-            timed_out = case == 'partial_zero' or (case == 'partial_count' and '210.116.108.137' in query)
-            if case == 'partial_count' and timed_out:
-                count = 29918
-            elif case == 'partial_zero':
-                count = 0
-            relation = 'gte' if case == 'lower_bound' else 'eq'
-            self.reply(200, {'timed_out': timed_out, 'hits': {'total': {'value': count, 'relation': relation}}, '_shards': {'failed': 0}})
+            return
+        count = (100 if fw else 10) if latest else (23 if fw else 446)
+        timed_out = case == 'partial_zero' or (case == 'partial_count' and latest and fw)
+        if case in ['zero', 'partial_zero']:
+            count = 0
+        elif case == 'partial_count' and latest and fw:
+            count = 29918
+        relation = 'gte' if case == 'lower_bound' else 'eq'
+        failed = 1 if case == 'shard_failure' and latest and fw else 0
+        self.reply(200, {'timed_out': timed_out, 'hits': {'total': {'value': count, 'relation': relation}}, '_shards': {'failed': failed}})
 
     def reply(self, status, data):
         body = json.dumps(data).encode()
@@ -82,7 +103,7 @@ class Fixture(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
             pass
 
     def log_message(self, *args):
@@ -128,7 +149,7 @@ def main():
         print('REPRODUCED: file-open error 53 overwritten by Object required 424', flush=True)
         report.append({'case': 'object_required_mask_reproduced', 'status': 'passed'})
         try:
-            for case in ['normal', 'slow_count', 'shared_deadline', 'zero', 'partial_count', 'partial_zero', 'lower_bound', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
+            for case in ['normal', 'slow_count', 'shared_deadline', 'slow_catalog', 'zero', 'empty_indices', 'partial_count', 'partial_zero', 'lower_bound', 'unauthorized', 'shard_failure', 'missing_count', 'abuse_unauthorized', 'abuse_empty']:
                 STATE['case'] = case
                 STATE['requests'] = []
                 url = 'http://127.0.0.1:18080/ip_lookup_opensearch.asp?ip=203.0.113.9'
@@ -147,38 +168,31 @@ def main():
                     assert 'TEST ISP' in html and 'example.test' in html, html
                     assert '75 / 100' in html and '>99<' in html and '>12<' in html, html
                 elapsed = time.monotonic() - started
-                assert len(STATE['requests']) == (1 if case == 'slow_count' else 2), html
-                if case == 'slow_count':
-                    assert html.count('탐지 횟수: 시간 초과') == 2, html
-                    assert '탐지 횟수: 0건' not in html and '탐지 횟수: 0+건' not in html, html
-                    assert 8 <= elapsed < 13, elapsed
-                elif case == 'shared_deadline':
-                    assert '방화벽 탐지 횟수: 123건' in html, html
-                    assert '웹방화벽 탐지 횟수: 시간 초과' in html, html
-                    assert 8 <= elapsed < 13, elapsed
-                elif case in ['normal', 'abuse_unauthorized', 'abuse_empty']:
-                    assert '방화벽 탐지 횟수: 123건' in html, html
-                    assert '웹방화벽 탐지 횟수: 456건' in html, html
-                elif case == 'partial_count':
-                    assert '방화벽 탐지 횟수: 29918+건' in html, html
-                    assert '웹방화벽 탐지 횟수: 456건' in html, html
-                elif case == 'partial_zero':
-                    assert '방화벽 탐지 횟수: 0+건' in html, html
-                    assert '웹방화벽 탐지 횟수: 0+건' in html, html
-                elif case == 'lower_bound':
-                    assert '방화벽 탐지 횟수: 123+건' in html, html
-                    assert '웹방화벽 탐지 횟수: 456+건' in html, html
-                elif case == 'zero':
-                    assert '방화벽 탐지 횟수: 0건' in html, html
-                    assert '웹방화벽 탐지 횟수: 0건' in html, html
+                expected_requests = 0 if case in ['slow_catalog', 'empty_indices', 'unauthorized'] else (3 if case in ['slow_count', 'shared_deadline'] else 4)
+                assert len(STATE['requests']) == expected_requests, html
+                expected = {
+                    'slow_count': ('100+', '10+'),
+                    'shared_deadline': ('100+', '10+'),
+                    'slow_catalog': ('0+', '0+'),
+                    'zero': ('0', '0'),
+                    'empty_indices': ('0', '0'),
+                    'partial_count': ('29941+', '456'),
+                    'partial_zero': ('0+', '0+'),
+                    'lower_bound': ('123+', '456+'),
+                    'shard_failure': ('123+', '456'),
+                    'missing_count': ('23+', '456'),
+                }.get(case, ('123', '456'))
+                if case == 'unauthorized':
+                    assert html.count('조회 실패 CURL 22') == 2, html
                 else:
-                    expected = {'unauthorized': 'CURL 22', 'shard_failure': 'ERROR SHARD_FAILURE',
-                                'missing_count': 'ERROR INVALID_COUNT'}[case]
-                    assert html.count(expected) == 2, html
-                    assert '탐지 횟수: 0건' not in html, html
+                    assert '방화벽 탐지 횟수: ' + expected[0] + '건' in html, html
+                    assert '웹방화벽 탐지 횟수: ' + expected[1] + '건' in html, html
+                    assert '시간 초과' not in html, html
+                if case in ['slow_count', 'shared_deadline', 'slow_catalog']:
+                    assert 8 <= elapsed < 13, elapsed
                 report.append({'case': case, 'status': 'passed', 'requests': len(STATE['requests']), 'elapsed_seconds': round(elapsed, 3)})
                 print('PASSED:', case, flush=True)
-            broken = asp.replace('body = readTextFile(fso, bodyPath)', 'body = readTextFile(fso, bodyPath & ".missing")')
+            broken = asp.replace('openSearchJSON = readTextFile(fso, bodyPath)', 'openSearchJSON = readTextFile(fso, bodyPath & ".missing")')
             (ROOT / 'broken.asp').write_bytes(broken.encode('cp949'))
             STATE['case'] = 'normal'
             with urlopen('http://127.0.0.1:18080/broken.asp?ip=203.0.113.9', timeout=70) as response:
@@ -191,7 +205,7 @@ def main():
             http.shutdown()
             https.shutdown()
             (HERE / 'tests/test-report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    print('Passed CURL 26 reproduction and 12 real IIS Classic ASP cases (including partial counts and a shared 10-second transport deadline); optional client TLS certificates; count-only responses.')
+    print('Passed CURL 26 reproduction and 14 real IIS Classic ASP cases (including preserved per-index accumulated counts at the shared ten-second deadline); optional client TLS certificates; count-only responses.')
 
 
 if __name__ == '__main__':
