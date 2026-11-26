@@ -1,0 +1,45 @@
+name: OpenSearch Classic ASP integration
+on:
+  push:
+    branches: [main]
+    paths:
+      - '*.asp'
+      - '*.py'
+      - tests/**
+      - .github/workflows/opensearch-asp.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-iis:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Enable Classic ASP and create isolated IIS test site
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-WindowsFeature Web-Server,Web-Asp,Web-Mgmt-Tools | Out-Host
+          Import-Module WebAdministration
+          New-Item -ItemType Directory -Force C:\inetpub\opensearch-lookup-ci | Out-Null
+          New-WebAppPool -Name OpenSearchLookupCI | Out-Null
+          New-Website -Name OpenSearchLookupCI -Port 18080 -PhysicalPath C:\inetpub\opensearch-lookup-ci -ApplicationPool OpenSearchLookupCI | Out-Null
+          Set-WebConfigurationProperty -PSPath 'IIS:\' -Filter 'system.webServer/asp' -Location OpenSearchLookupCI -Name scriptErrorSentToBrowser -Value $true
+          Set-WebConfigurationProperty -PSPath 'IIS:\' -Filter 'system.webServer/httpErrors' -Location OpenSearchLookupCI -Name errorMode -Value Detailed
+          Start-Service W3SVC
+      - name: Run real ASP requests against optional-client-certificate HTTPS fixture
+        shell: powershell
+        run: |
+          python tests/test_iis.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Publish test report
+        if: always()
+        shell: powershell
+        run: |
+          if (Test-Path tests/test-report.json) {
+            Get-Content tests/test-report.json | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY
+          }
