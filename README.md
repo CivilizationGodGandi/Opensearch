@@ -31,3 +31,6 @@ GitHub Actions에서 실제 Windows IIS/Classic ASP 페이지를 호출합니다
 운영 OpenSearch에 직접 접속하는 테스트는 포함하지 않습니다.
 
 단일 ASP Windows IIS 테스트 5개 통과: https://github.com/CivilizationGodGandi/Opensearch/actions/runs/45756489593
+
+AbuseIPDB의 HTTP 401 또는 IP 응답 누락 시에도 입력 IP로 OpenSearch 건수 조회와 화면 표시를 계속합니다.
+백지 화면 실패 경로를 포함한 IIS 테스트 7개 통과: https://github.com/CivilizationGodGandi/Opensearch/actions/runs/45757370330
